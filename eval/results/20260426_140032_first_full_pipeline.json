@@ -1,0 +1,213 @@
+{
+  "timestamp": "20260426_140032",
+  "note": "first_full_pipeline",
+  "skip_generation": false,
+  "metrics": {
+    "n_questions": 7,
+    "n_in_corpus": 5,
+    "n_traps": 2,
+    "in_corpus_top_1_accuracy": 1.0,
+    "in_corpus_top_5_hit_rate": 1.0,
+    "overall_pass_rate": 1.0,
+    "avg_latency_ms": 15778.714285714286,
+    "avg_max_rerank_score_in_corpus": 0.6979956030845642,
+    "in_corpus_no_false_refusal_rate": 1.0,
+    "trap_refusal_rate": 1.0,
+    "avg_cost_usd": 0.017440285714285714,
+    "total_cost_usd": 0.122082
+  },
+  "per_question": [
+    {
+      "id": "pdv_001",
+      "query": "Kolika je opća stopa PDV-a?",
+      "in_corpus": true,
+      "expected_articles": [
+        "38"
+      ],
+      "top_articles": [
+        "38",
+        "38",
+        "37",
+        "36",
+        "122"
+      ],
+      "retrieval_top_1": true,
+      "retrieval_top_5": true,
+      "max_rerank_score": 0.43471822142601013,
+      "refused": false,
+      "refusal_correct": true,
+      "answer_preview": "Opća stopa PDV-a iznosi 25% (Zakon o porezu na dodanu vrijednost, NN 73/2013, čl. 38, st. 1). Napomena: ovaj propis bio je na snazi od 1. srpnja do 31. prosinca 2013. i označen je kao nevažeći. Za trenutno važeću stopu preporučujemo provjeru aktualne verzije Zakona o PDV-u ili obraćanje RRiF savjetn",
+      "n_citations": 1,
+      "keyword_hits": 0,
+      "keyword_total": 0,
+      "passed": true,
+      "latency_ms": 26643,
+      "cost_usd": 0.012732,
+      "trace_path": "logs\\runs\\20260426_135842_c043b3d8.json"
+    },
+    {
+      "id": "pdv_002",
+      "query": "Koja je porezna osnovica kod uvoza dobara?",
+      "in_corpus": true,
+      "expected_articles": [
+        "35"
+      ],
+      "top_articles": [
+        "35",
+        "34",
+        "32",
+        "33",
+        "36"
+      ],
+      "retrieval_top_1": true,
+      "retrieval_top_5": true,
+      "max_rerank_score": 0.9944235682487488,
+      "refused": false,
+      "refusal_correct": true,
+      "answer_preview": "Porezna osnovica kod uvoza dobara utvrđuje se na sljedeći način:\n\n**1. Osnovna pravila (čl. 35. st. 1.)**\nPoreznu osnovicu pri uvozu dobara čini **carinska vrijednost** utvrđena prema carinskim propisima. (Zakon o PDV-u, NN 73/2013, čl. 35. st. 1.)\n\n**2. Elementi koji se dodaju u poreznu osnovicu** ",
+      "n_citations": 2,
+      "keyword_hits": 0,
+      "keyword_total": 0,
+      "passed": true,
+      "latency_ms": 21081,
+      "cost_usd": 0.027126,
+      "trace_path": "logs\\runs\\20260426_135909_2a06daf5.json"
+    },
+    {
+      "id": "pdv_003",
+      "query": "Što su porezni obveznici i tko nije porezni obveznik?",
+      "in_corpus": true,
+      "expected_articles": [
+        "6"
+      ],
+      "top_articles": [
+        "6",
+        "16",
+        "6",
+        "26",
+        "74"
+      ],
+      "retrieval_top_1": true,
+      "retrieval_top_5": true,
+      "max_rerank_score": 0.9087916612625122,
+      "refused": false,
+      "refusal_correct": true,
+      "answer_preview": "**Porezni obveznik** je svaka osoba koja samostalno obavlja bilo koju gospodarsku djelatnost bez obzira na svrhu i rezultat obavljanja te djelatnosti (Zakon o PDV-u, NN 73/2013, čl. 6, st. 1).\n\n**Gospodarska djelatnost** obuhvaća svaku djelatnost proizvođača, trgovaca ili osoba koje obavljaju usluge",
+      "n_citations": 2,
+      "keyword_hits": 0,
+      "keyword_total": 0,
+      "passed": true,
+      "latency_ms": 23917,
+      "cost_usd": 0.022719,
+      "trace_path": "logs\\runs\\20260426_135930_22a47bc1.json"
+    },
+    {
+      "id": "pdv_004",
+      "query": "Kada se PDV obračunava po sniženoj stopi?",
+      "in_corpus": true,
+      "expected_articles": [
+        "38"
+      ],
+      "top_articles": [
+        "38",
+        "37",
+        "30",
+        "36",
+        "73"
+      ],
+      "retrieval_top_1": true,
+      "retrieval_top_5": true,
+      "max_rerank_score": 0.9506276249885559,
+      "refused": false,
+      "refusal_correct": true,
+      "answer_preview": "Prema dostavljenim izvorima, PDV se obračunava po sniženoj stopi od 5% na isporuke sljedećih dobara i usluga: (a) sve vrste kruha, (b) sve vrste mlijeka (kravlje, ovčje, kozje) u tekućem stanju, svježe, pasterizirano, homogenizirano, kondenzirano — osim kiselog mlijeka, jogurta, kera, čokoladnog mli",
+      "n_citations": 1,
+      "keyword_hits": 0,
+      "keyword_total": 0,
+      "passed": true,
+      "latency_ms": 12146,
+      "cost_usd": 0.017568,
+      "trace_path": "logs\\runs\\20260426_135954_a9663d5e.json"
+    },
+    {
+      "id": "pdv_005_paraphrase",
+      "query": "Koliki je standardni postotak PDV-a u Hrvatskoj?",
+      "in_corpus": true,
+      "expected_articles": [
+        "38"
+      ],
+      "top_articles": [
+        "38",
+        "38",
+        "85",
+        "2",
+        "37"
+      ],
+      "retrieval_top_1": true,
+      "retrieval_top_5": true,
+      "max_rerank_score": 0.20141693949699402,
+      "refused": false,
+      "refusal_correct": true,
+      "answer_preview": "Standardna (osnovna) stopa PDV-a u Hrvatskoj iznosi 25% (Zakon o PDV-u, NN 73/2013, čl. 38, st. 1). Napomena: dostavljeni izvor odnosi se na verziju zakona koja je bila na snazi od 1. srpnja 2013. do 31. prosinca 2013. te je označena kao nevažeća. Za trenutno važeću stopu preporučuje se provjera akt",
+      "n_citations": 1,
+      "keyword_hits": 0,
+      "keyword_total": 0,
+      "passed": true,
+      "latency_ms": 10740,
+      "cost_usd": 0.016686,
+      "trace_path": "logs\\runs\\20260426_140006_55e70cb3.json"
+    },
+    {
+      "id": "trap_001_outside_corpus",
+      "query": "Kolika je stopa poreza na dohodak za 2024.?",
+      "in_corpus": false,
+      "expected_articles": [],
+      "top_articles": [
+        "38",
+        "132",
+        "84",
+        "27",
+        "143"
+      ],
+      "retrieval_top_1": false,
+      "retrieval_top_5": false,
+      "max_rerank_score": 0.05574459955096245,
+      "refused": true,
+      "refusal_correct": true,
+      "answer_preview": "Nemam dovoljno informacija u dostupnoj bazi za pouzdan odgovor na ovo pitanje. Dostavljeni kontekst odnosi se isključivo na odredbe Zakona o porezu na dodanu vrijednost (PDV), a ne na porez na dohodak. Preporučujem obraćanje RRiF savjetničkoj liniji.",
+      "n_citations": 0,
+      "keyword_hits": null,
+      "keyword_total": null,
+      "passed": true,
+      "latency_ms": 6631,
+      "cost_usd": 0.011937,
+      "trace_path": "logs\\runs\\20260426_140016_9f1b2143.json"
+    },
+    {
+      "id": "trap_002_fictional",
+      "query": "Što kaže članak 99. Zakona o fiktivnom porezu na digitalne usluge?",
+      "in_corpus": false,
+      "expected_articles": [],
+      "top_articles": [
+        "124",
+        "99",
+        "25",
+        "24",
+        "21"
+      ],
+      "retrieval_top_1": false,
+      "retrieval_top_5": false,
+      "max_rerank_score": 0.037696123123168945,
+      "refused": true,
+      "refusal_correct": true,
+      "answer_preview": "(Model nije vratio očekivani JSON format. Sirovi odgovor: ```json\n{\n  \"refused\": true,\n  \"answer\": \"Nemam dovoljno informacija u dostupnoj bazi za pouzdan odgovor na ovo pitanje. Napominjem da u dostavljenom kontekstu ne postoji „Zakon o fiktivnom porezu na digitalne usluge\" — taj naziv ne odgovara ",
+      "n_citations": 0,
+      "keyword_hits": null,
+      "keyword_total": null,
+      "passed": true,
+      "latency_ms": 9293,
+      "cost_usd": 0.013314,
+      "trace_path": "logs\\runs\\20260426_140023_c71ba196.json"
+    }
+  ]
+}

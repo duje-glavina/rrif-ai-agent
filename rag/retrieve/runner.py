@@ -1,11 +1,11 @@
-"""Run-time tracer: wraps the retrieval pipeline and logs every stage to disk.
+"""Run-time tracer: orchestrates the full pipeline and logs every stage.
+
+Pipeline:
+    semantic retrieval → reranking → Claude generation
 
 Each call to `run_query()` produces:
-  - The answer / retrieved chunks (returned to the caller)
-  - A JSON file in logs/runs/ capturing the full trace
-
-The trace schema is intentionally extensible: new pipeline stages
-(classifier, generation, etc.) can be added without breaking older logs.
+  - The generated answer + retrieved chunks (returned to the caller)
+  - A JSON file in logs/runs/ capturing the full trace, including LLM stage
 """
 from __future__ import annotations
 
@@ -17,7 +17,6 @@ import time
 from dataclasses import dataclass, field, asdict
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Any
 
 import psycopg
 from dotenv import load_dotenv
@@ -25,6 +24,7 @@ from pgvector.psycopg import register_vector
 
 from rag.embedder import embed_query, MODEL_NAME as EMBEDDER_NAME
 from rag.retrieve.rerank import rerank, MODEL_NAME as RERANKER_NAME
+from rag.generate.answerer import answer, system_prompt_hash, DEFAULT_MODEL
 
 load_dotenv()
 
@@ -33,13 +33,21 @@ LOGS_DIR = Path("logs/runs")
 LOGS_DIR.mkdir(parents=True, exist_ok=True)
 
 
+# Cost lookup. Values are USD per 1K tokens. Update when pricing changes.
+# If a model isn't here, cost is reported as None instead of guessed.
+PRICING_PER_1K = {
+    "claude-sonnet-4-6": {"input": 0.003, "output": 0.015},
+    "claude-opus-4-7":   {"input": 0.015, "output": 0.075},
+    "claude-haiku-4-5-20251001": {"input": 0.001, "output": 0.005},
+}
+
+
 # ---------------------------------------------------------------------------
 # Trace data structures
 # ---------------------------------------------------------------------------
 
 @dataclass
 class StageTrace:
-    """One pipeline stage's worth of timing + payload."""
     name: str
     latency_ms: int
     data: dict = field(default_factory=dict)
@@ -47,7 +55,6 @@ class StageTrace:
 
 @dataclass
 class RunTrace:
-    """Full trace for one query going through the pipeline."""
     timestamp: str
     query: str
     config: dict
@@ -74,7 +81,6 @@ class RunTrace:
 # ---------------------------------------------------------------------------
 
 def _git_sha() -> str:
-    """Best-effort capture of current commit. Returns 'unknown' on failure."""
     try:
         result = subprocess.run(
             ["git", "rev-parse", "--short", "HEAD"],
@@ -86,8 +92,6 @@ def _git_sha() -> str:
 
 
 def _query_hash(query: str) -> str:
-    """Short stable hash, used in log filenames so re-runs of the same
-    query don't collide."""
     return hashlib.sha256(query.encode("utf-8")).hexdigest()[:8]
 
 
@@ -100,6 +104,17 @@ def _now_ms() -> float:
     return time.perf_counter() * 1000
 
 
+def _estimate_cost(model: str, input_tokens: int, output_tokens: int) -> float | None:
+    pricing = PRICING_PER_1K.get(model)
+    if not pricing:
+        return None
+    return round(
+        (input_tokens / 1000) * pricing["input"]
+        + (output_tokens / 1000) * pricing["output"],
+        6,
+    )
+
+
 # ---------------------------------------------------------------------------
 # Pipeline stages
 # ---------------------------------------------------------------------------
@@ -109,7 +124,6 @@ TOP_K = 5
 
 
 def _semantic_candidates(query: str, n: int) -> list[dict]:
-    """Pull n nearest chunks by cosine distance."""
     qvec = embed_query(query)
     with psycopg.connect(os.environ["DATABASE_URL"]) as conn:
         register_vector(conn)
@@ -118,7 +132,7 @@ def _semantic_candidates(query: str, n: int) -> list[dict]:
                 """
                 SELECT id::text, article_number, chunk_text,
                        1 - (embedding <=> %s) AS similarity,
-                       law_name, source, valid_from, valid_to, status, citable
+                       law_name, source, valid_from, valid_to, status, citable, nn_reference
                 FROM chunks
                 ORDER BY embedding <=> %s
                 LIMIT %s
@@ -138,6 +152,7 @@ def _semantic_candidates(query: str, n: int) -> list[dict]:
             "valid_to": r[7].isoformat() if r[7] else None,
             "status": r[8],
             "citable": r[9],
+            "nn_reference": r[10],
         }
         for r in rows
     ]
@@ -149,12 +164,15 @@ def _semantic_candidates(query: str, n: int) -> list[dict]:
 
 @dataclass
 class RunResult:
-    """What `run_query()` returns to the caller. Mirrors what the trace contains
-    but in convenient form for downstream code (eval harness, future API)."""
     query: str
     top_chunks: list[dict]
+    answer_text: str
+    refused: bool
+    citations: list[dict]
+    temporal_note: str | None
     trace_path: Path
     total_latency_ms: int
+    estimated_cost_usd: float | None
 
 
 def run_query(
@@ -163,10 +181,12 @@ def run_query(
     candidate_pool: int = CANDIDATE_POOL,
     top_k: int = TOP_K,
     persist: bool = True,
+    skip_generation: bool = False,
 ) -> RunResult:
-    """Run query through the full retrieval pipeline, log the trace, return results.
+    """Run query through retrieval + generation, log everything, return results.
 
-    `persist=False` skips writing the trace to disk — useful for tests.
+    `skip_generation=True` returns retrieval-only results — useful for
+    debugging the retrieval layer without spending API tokens.
     """
     started_at = datetime.now(timezone.utc)
     pipeline_start = _now_ms()
@@ -177,14 +197,24 @@ def run_query(
         config={
             "embedder": EMBEDDER_NAME,
             "reranker": RERANKER_NAME,
+            "generator": DEFAULT_MODEL if not skip_generation else None,
+            "system_prompt_hash": system_prompt_hash() if not skip_generation else None,
             "candidate_pool": candidate_pool,
             "top_k": top_k,
             "git_sha": _git_sha(),
         },
     )
 
+    answer_text = ""
+    refused = False
+    citations: list[dict] = []
+    temporal_note: str | None = None
+    estimated_cost: float | None = None
+
+    log_path = _log_path(query, started_at)
+
     try:
-        # Stage 1: semantic candidates
+        # Stage 1: semantic retrieval
         t0 = _now_ms()
         candidates = _semantic_candidates(query, n=candidate_pool)
         trace.add_stage(
@@ -209,7 +239,6 @@ def run_query(
         t0 = _now_ms()
         rerank_input = [(c["chunk_id"], c["chunk_text"]) for c in candidates]
         ranked = rerank(query, rerank_input, k=top_k)
-        # build a lookup so we can attach metadata to the reranked output
         by_id = {c["chunk_id"]: c for c in candidates}
         top_chunks = []
         for cid, text, score in ranked:
@@ -234,13 +263,39 @@ def run_query(
             },
         )
 
+        # Stage 3: generation (optional)
+        if not skip_generation:
+            t0 = _now_ms()
+            gen = answer(query, top_chunks)
+            estimated_cost = _estimate_cost(
+                gen.model, gen.input_tokens, gen.output_tokens,
+            )
+            answer_text = gen.answer
+            refused = gen.refused
+            citations = gen.citations
+            temporal_note = gen.temporal_note
+            trace.add_stage(
+                name="generation",
+                latency_ms=int(_now_ms() - t0),
+                data={
+                    "model": gen.model,
+                    "input_tokens": gen.input_tokens,
+                    "output_tokens": gen.output_tokens,
+                    "estimated_cost_usd": estimated_cost,
+                    "refused": gen.refused,
+                    "answer": gen.answer,
+                    "citations": gen.citations,
+                    "temporal_note": gen.temporal_note,
+                    "raw_response": gen.raw_response,
+                },
+            )
+
     except Exception as exc:
         trace.error = f"{type(exc).__name__}: {exc}"
         raise
     finally:
         trace.total_latency_ms = int(_now_ms() - pipeline_start)
         if persist:
-            log_path = _log_path(query, started_at)
             log_path.write_text(
                 json.dumps(trace.to_dict(), indent=2, ensure_ascii=False),
                 encoding="utf-8",
@@ -249,8 +304,13 @@ def run_query(
     return RunResult(
         query=query,
         top_chunks=top_chunks,
+        answer_text=answer_text,
+        refused=refused,
+        citations=citations,
+        temporal_note=temporal_note,
         trace_path=log_path if persist else Path("/dev/null"),
         total_latency_ms=trace.total_latency_ms,
+        estimated_cost_usd=estimated_cost,
     )
 
 
@@ -261,10 +321,17 @@ if __name__ == "__main__":
         sys.exit(1)
     q = " ".join(sys.argv[1:])
     result = run_query(q)
-    print(f"\nTrace written to: {result.trace_path}")
-    print(f"Total latency: {result.total_latency_ms} ms\n")
-    for i, chunk in enumerate(result.top_chunks, start=1):
-        art = chunk["article_number"] or "[preamble]"
-        score = chunk["rerank_score"]
-        preview = chunk["chunk_text"][:120].replace("\n", " ")
-        print(f"  #{i}  {score:.4f}  Članak {art:6s}  {preview}...")
+    print(f"\n{'=' * 70}")
+    print(f"Query:   {result.query}")
+    print(f"Latency: {result.total_latency_ms} ms")
+    if result.estimated_cost_usd is not None:
+        print(f"Cost:    ${result.estimated_cost_usd:.5f}")
+    print(f"Trace:   {result.trace_path}")
+    print(f"Refused: {result.refused}")
+    print(f"\nAnswer:\n{result.answer_text}")
+    if result.citations:
+        print(f"\nCitations:")
+        for c in result.citations:
+            print(f"  - {c.get('law_name')}, {c.get('nn_reference')}, čl. {c.get('article_number')}")
+    if result.temporal_note:
+        print(f"\nTemporal note: {result.temporal_note}")
