@@ -1,0 +1,167 @@
+{
+  "timestamp": "20260426_132707",
+  "note": "baseline_retrieval_only",
+  "metrics": {
+    "n_questions": 7,
+    "n_in_corpus": 5,
+    "n_traps": 2,
+    "in_corpus_top_1_accuracy": 1.0,
+    "in_corpus_top_5_hit_rate": 1.0,
+    "trap_refusal_rate": 1.0,
+    "overall_pass_rate": 1.0,
+    "avg_latency_ms": 3660.1428571428573,
+    "avg_max_rerank_score_in_corpus": 0.6979956030845642
+  },
+  "per_question": [
+    {
+      "id": "pdv_001",
+      "query": "Kolika je opća stopa PDV-a?",
+      "expected_articles": [
+        "38"
+      ],
+      "in_corpus": true,
+      "top_articles": [
+        "38",
+        "38",
+        "37",
+        "36",
+        "122"
+      ],
+      "top_1_hit": true,
+      "top_5_hit": true,
+      "max_rerank_score": 0.43471822142601013,
+      "passed": true,
+      "verdict": "✅ pass",
+      "latency_ms": 16654,
+      "trace_path": "logs\\runs\\20260426_132641_c043b3d8.json"
+    },
+    {
+      "id": "pdv_002",
+      "query": "Koja je porezna osnovica kod uvoza dobara?",
+      "expected_articles": [
+        "35"
+      ],
+      "in_corpus": true,
+      "top_articles": [
+        "35",
+        "34",
+        "32",
+        "33",
+        "36"
+      ],
+      "top_1_hit": true,
+      "top_5_hit": true,
+      "max_rerank_score": 0.9944235682487488,
+      "passed": true,
+      "verdict": "✅ pass",
+      "latency_ms": 2010,
+      "trace_path": "logs\\runs\\20260426_132658_2a06daf5.json"
+    },
+    {
+      "id": "pdv_003",
+      "query": "Što su porezni obveznici i tko nije porezni obveznik?",
+      "expected_articles": [
+        "6"
+      ],
+      "in_corpus": true,
+      "top_articles": [
+        "6",
+        "16",
+        "6",
+        "26",
+        "74"
+      ],
+      "top_1_hit": true,
+      "top_5_hit": true,
+      "max_rerank_score": 0.9087916612625122,
+      "passed": true,
+      "verdict": "✅ pass",
+      "latency_ms": 2206,
+      "trace_path": "logs\\runs\\20260426_132700_22a47bc1.json"
+    },
+    {
+      "id": "pdv_004",
+      "query": "Kada se PDV obračunava po sniženoj stopi?",
+      "expected_articles": [
+        "38"
+      ],
+      "in_corpus": true,
+      "top_articles": [
+        "38",
+        "37",
+        "30",
+        "36",
+        "73"
+      ],
+      "top_1_hit": true,
+      "top_5_hit": true,
+      "max_rerank_score": 0.9506276249885559,
+      "passed": true,
+      "verdict": "✅ pass",
+      "latency_ms": 722,
+      "trace_path": "logs\\runs\\20260426_132702_a9663d5e.json"
+    },
+    {
+      "id": "pdv_005_paraphrase",
+      "query": "Koliki je standardni postotak PDV-a u Hrvatskoj?",
+      "expected_articles": [
+        "38"
+      ],
+      "in_corpus": true,
+      "top_articles": [
+        "38",
+        "38",
+        "85",
+        "2",
+        "37"
+      ],
+      "top_1_hit": true,
+      "top_5_hit": true,
+      "max_rerank_score": 0.20141693949699402,
+      "passed": true,
+      "verdict": "✅ pass",
+      "latency_ms": 1617,
+      "trace_path": "logs\\runs\\20260426_132703_55e70cb3.json"
+    },
+    {
+      "id": "trap_001_outside_corpus",
+      "query": "Kolika je stopa poreza na dohodak za 2024.?",
+      "expected_articles": [],
+      "in_corpus": false,
+      "top_articles": [
+        "38",
+        "132",
+        "84",
+        "27",
+        "143"
+      ],
+      "top_1_hit": false,
+      "top_5_hit": false,
+      "max_rerank_score": 0.05574459955096245,
+      "passed": true,
+      "verdict": "✅ would-refuse",
+      "latency_ms": 876,
+      "trace_path": "logs\\runs\\20260426_132704_9f1b2143.json"
+    },
+    {
+      "id": "trap_002_fictional",
+      "query": "Što kaže članak 99. Zakona o fiktivnom porezu na digitalne usluge?",
+      "expected_articles": [],
+      "in_corpus": false,
+      "top_articles": [
+        "124",
+        "99",
+        "25",
+        "24",
+        "21"
+      ],
+      "top_1_hit": false,
+      "top_5_hit": false,
+      "max_rerank_score": 0.037696123123168945,
+      "passed": true,
+      "verdict": "✅ would-refuse",
+      "latency_ms": 1536,
+      "trace_path": "logs\\runs\\20260426_132705_c71ba196.json"
+    }
+  ]
+}
