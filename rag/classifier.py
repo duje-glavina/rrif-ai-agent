@@ -36,6 +36,11 @@ log = logging.getLogger(__name__)
 
 CLASSIFIER_MODEL = "claude-haiku-4-5"
 
+# NOTE: DB stores status as 'vazeci' / 'nevazeci' (no diacritics).
+# Always use these constants — never hardcode the strings elsewhere.
+STATUS_VALID   = "vazeci"
+STATUS_INVALID = "nevazeci"
+
 CATEGORIES = Literal[
     "PDV",
     "dohodak",
@@ -102,11 +107,10 @@ class TimePeriod:
     def to_sql_filter(self) -> str | None:
         """Return a SQL WHERE fragment for temporal filtering, or None for current."""
         if self.type == "current":
-            return "status = 'važeći'"
+            # Use no-diacritic value — matches what ingest scripts write to DB
+            return f"status = '{STATUS_VALID}'"
         if self.type in ("specific_date", "range"):
             df = self.date_from or "1900-01-01"
-            # For specific_date, use date_from as the point-in-time reference.
-            # A chunk is valid on date D if: valid_from <= D <= valid_to (or valid_to IS NULL)
             dt = self.date_to or self.date_from or "9999-12-31"
             return (
                 f"valid_from <= '{df}'::date "
@@ -119,14 +123,14 @@ class TimePeriod:
 # Maps classifier output categories to actual DB category values.
 # DB categories come from article_loader.py banner detection.
 _CATEGORY_MAP: dict = {
-    "PDV":          "porezi",
-    "dohodak":      "porezi",
-    "doprinosi":    "plaće",
-    "računovodstvo":"računovodstvo",
-    "GDPR":         "ostalo",
-    "radno_pravo":  "radno pravo",
-    "proračun":     "proračun",
-    "ostalo":       None,  # no filter — search everything
+    "PDV":           "PDV",
+    "dohodak":       "porezi",
+    "doprinosi":     "plaće",
+    "računovodstvo": "računovodstvo",
+    "GDPR":          "ostalo",
+    "radno_pravo":   "radno pravo",
+    "proračun":      "proračun",
+    "ostalo":        None,  # no filter — search everything
 }
 
 
@@ -155,7 +159,10 @@ def classify(question: str) -> ClassifierResult:
     Returns a ClassifierResult with sensible defaults if the model
     returns malformed JSON or if the API call fails.
     """
-    client = anthropic.Anthropic(api_key=os.environ["ANTHROPIC_API_KEY"])
+    client = anthropic.Anthropic(
+        api_key=os.environ["ANTHROPIC_API_KEY"],
+        timeout=15.0,  # 15 second timeout — classifier should never take longer
+    )
 
     try:
         response = client.messages.create(

@@ -14,6 +14,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import re
 import sys
 from datetime import datetime, timezone
 from pathlib import Path
@@ -21,13 +22,41 @@ from pathlib import Path
 import yaml
 
 sys.path.insert(0, str(Path(__file__).parent.parent))
-from rag.retrieve.runner import run_query
+from rag.query import ask
 
 
 GOLDEN_SET_PATH = Path("eval/golden_set.yaml")
 RESULTS_DIR = Path("eval/results")
 RESULTS_DIR.mkdir(parents=True, exist_ok=True)
 
+
+# ---------------------------------------------------------------------------
+# Article number normalizer
+# ---------------------------------------------------------------------------
+
+def _extract_article_number(raw: str | None) -> str | None:
+    """Extract the base article number from a citation string.
+
+    Examples:
+        'čl. 35. st. 1. Zakona o PDV-u'   -> '35'
+        '38. st. 3. t. a) Zakona o PDV-u'  -> '38'
+        'čl. 2'                             -> '2'
+        '38'                                -> '38'
+        None                                -> None
+    """
+    if not raw:
+        return None
+    s = raw.strip()
+    s = re.sub(r'^č(l|lan)\.?\s*', '', s, flags=re.IGNORECASE)
+    s = re.sub(r'^art\.?\s*', '', s, flags=re.IGNORECASE)
+    s = s.strip()
+    m = re.match(r'^(\d+)', s)
+    return m.group(1) if m else None
+
+
+# ---------------------------------------------------------------------------
+# Helpers
+# ---------------------------------------------------------------------------
 
 def load_golden_set() -> list[dict]:
     with GOLDEN_SET_PATH.open(encoding="utf-8") as f:
@@ -43,16 +72,27 @@ def _keyword_hits(answer_text: str, keywords: list[str]) -> tuple[int, int]:
     return hits, len(keywords)
 
 
-def evaluate_one(item: dict, *, skip_generation: bool) -> dict:
-    """Run one question through the pipeline and grade the result."""
-    result = run_query(item["query"], skip_generation=skip_generation)
+# ---------------------------------------------------------------------------
+# Core evaluation
+# ---------------------------------------------------------------------------
 
-    top_articles = [c["article_number"] for c in result.top_chunks]
+def evaluate_one(item: dict, *, skip_generation: bool) -> dict:
+    """Run one question through the full pipeline and grade the result."""
+    result = ask(item["query"])
+
+    # Normalize article numbers from citations for comparison
+    top_articles = [
+        _extract_article_number(c.article_number)
+        for c in result.citations
+        if c.article_number
+    ]
+    top_articles = [a for a in top_articles if a]  # drop unparseable
+
     top_1_article = top_articles[0] if top_articles else None
     expected = item["expected_articles"]
-    max_score = result.top_chunks[0]["rerank_score"] if result.top_chunks else 0.0
+    max_score = 1.0 if result.citations else 0.0
 
-    # Retrieval grading (always applicable)
+    # Retrieval grading
     if item["in_corpus"]:
         retrieval_top_1 = top_1_article in expected
         retrieval_top_5 = any(art in expected for art in top_articles)
@@ -60,30 +100,39 @@ def evaluate_one(item: dict, *, skip_generation: bool) -> dict:
         retrieval_top_1 = False
         retrieval_top_5 = False
 
-    # Generation grading (only if we ran it)
+    # Generation grading
     refusal_correct = None
     keyword_hits = None
     keyword_total = None
     answer_text = ""
-    citations: list[dict] = []
+    citations_raw: list[dict] = []
     cost = None
 
     if not skip_generation:
-        answer_text = result.answer_text
-        citations = result.citations
-        cost = result.estimated_cost_usd
+        answer_text = result.answer
+        citations_raw = [
+            {
+                "source": c.source,
+                "article_number": c.article_number,
+                "excerpt": c.excerpt,
+            }
+            for c in result.citations
+        ]
+        cost = round(
+            (result.tokens_in / 1_000_000) * 3.0
+            + (result.tokens_out / 1_000_000) * 15.0,
+            6,
+        ) if (result.tokens_in or result.tokens_out) else None
+
         if item["in_corpus"]:
-            # Should NOT refuse on real questions
-            refusal_correct = not result.refused
+            refusal_correct = not result.referred_to_advisor
             hits, total = _keyword_hits(answer_text, item.get("expected_keywords", []))
             keyword_hits, keyword_total = hits, total
         else:
-            # SHOULD refuse on traps
-            refusal_correct = result.refused
+            refusal_correct = result.referred_to_advisor
 
-    # Overall pass: retrieval AND refusal correct (if generation ran)
     if skip_generation:
-        passed = retrieval_top_1 if item["in_corpus"] else (max_score < 0.10)
+        passed = retrieval_top_1 if item["in_corpus"] else (not result.citations)
     else:
         if item["in_corpus"]:
             passed = retrieval_top_1 and refusal_correct
@@ -99,18 +148,21 @@ def evaluate_one(item: dict, *, skip_generation: bool) -> dict:
         "retrieval_top_1": retrieval_top_1,
         "retrieval_top_5": retrieval_top_5,
         "max_rerank_score": max_score,
-        "refused": result.refused if not skip_generation else None,
+        "refused": result.referred_to_advisor if not skip_generation else None,
         "refusal_correct": refusal_correct,
         "answer_preview": answer_text[:300] if answer_text else "",
-        "n_citations": len(citations),
+        "n_citations": len(citations_raw),
         "keyword_hits": keyword_hits,
         "keyword_total": keyword_total,
         "passed": passed,
-        "latency_ms": result.total_latency_ms,
+        "latency_ms": result.latency_ms,
         "cost_usd": cost,
-        "trace_path": str(result.trace_path),
     }
 
+
+# ---------------------------------------------------------------------------
+# Aggregation
+# ---------------------------------------------------------------------------
 
 def aggregate(per_question: list[dict]) -> dict:
     n = len(per_question)
@@ -154,11 +206,15 @@ def aggregate(per_question: list[dict]) -> dict:
     return metrics
 
 
+# ---------------------------------------------------------------------------
+# Main
+# ---------------------------------------------------------------------------
+
 def main():
     parser = argparse.ArgumentParser()
     parser.add_argument("--note", default="", help="Free-form label for the results filename")
     parser.add_argument("--skip-generation", action="store_true",
-                        help="Run retrieval only, skip Claude (no API spend)")
+                        help="Classify + retrieve only, skip answer generation (saves API cost)")
     args = parser.parse_args()
 
     golden = load_golden_set()
