@@ -1,0 +1,418 @@
+"""End-to-end query pipeline for the RRiF AI Agent.
+
+Orchestrates the full RAG flow:
+  1. Classify question (Haiku)         → category, time_period, source_type
+  2. Hybrid retrieval with filters     → top 20 candidates from pgvector + FTS
+  3. Cross-encoder reranking (BGE)     → top 5 most relevant chunks
+  4. Answer generation (Sonnet)        → answer + citations + temporal basis
+  5. Return structured JSON response
+
+Usage:
+    from rag.query import ask
+    result = ask("Koji je rok za predaju PDV obrasca?")
+    print(result.answer)
+    print(result.citations)
+
+    # Or from CLI:
+    python -m rag.query "Koji je rok za predaju PDV obrasca?"
+"""
+from __future__ import annotations
+
+import json
+import logging
+import os
+from dataclasses import dataclass, field
+from datetime import date
+from textwrap import dedent
+from typing import Literal
+
+import anthropic
+import psycopg
+from dotenv import load_dotenv
+from pgvector.psycopg import register_vector
+
+from rag.classifier import ClassifierResult, classify
+from rag.embedder import embed_query
+from rag.retrieve.rerank import rerank
+
+load_dotenv()
+
+log = logging.getLogger(__name__)
+
+# ── Configuration ─────────────────────────────────────────────────────────────
+
+GENERATOR_MODEL   = "claude-sonnet-4-6"
+CANDIDATES        = 20    # hybrid retrieval pool before reranking
+TOP_K             = 5     # chunks passed to the generator after reranking
+RRF_K             = 60    # reciprocal rank fusion constant (matches hybrid.py)
+
+SYSTEM_PROMPT = """\
+Ti si AI agent koji pomaže savjetnicima i korisnicima RRiF-plus d.o.o.
+s pitanjima iz područja računovodstva, poreza i financija.
+
+PRAVILA KOJA MORAŠ STROGO POŠTOVATI:
+1. Odgovaraj ISKLJUČIVO na temelju dokumenata koji su ti dostavljeni kao kontekst.
+2. Svaki odgovor mora sadržavati navod izvora (naziv dokumenta/zakona, članak, godina).
+3. Ako odgovor nije pronađen u dostavljenim dokumentima, eksplicitno navedi da ne možeš
+   odgovoriti i uputi korisnika na RRiF savjetničku liniju.
+4. NIKADA ne izmišljaj odgovore, zakone, članke ili brojeve koji nisu u kontekstu.
+5. Jasno razlikuj važeće i nevažeće/stare propise ako su oba prisutna u kontekstu.
+6. Na kraju odgovora uvijek navedi vremensku osnovu: na koji datum se odnosi odgovor.
+7. Odgovaraj na hrvatskom jeziku.
+8. Vraćaj odgovor kao JSON objekt s poljima: answer, citations, temporal_basis,
+   confidence, referred_to_advisor.
+"""
+
+RESPONSE_SCHEMA = """\
+Vrati ISKLJUČIVO JSON bez ikakvog teksta prije ili nakon, u ovom obliku:
+{
+  "answer": "<tvoj odgovor na hrvatskom>",
+  "citations": [
+    {
+      "source": "<citation string iz konteksta>",
+      "article_number": "<broj članka ili null>",
+      "valid_from": "<YYYY-MM-DD ili null>",
+      "valid_to": "<YYYY-MM-DD ili null>",
+      "excerpt": "<kratki relevantni izvadak, max 200 znakova>"
+    }
+  ],
+  "temporal_basis": "<rečenica koja objašnjava na koji datum se odnosi odgovor>",
+  "confidence": "high",
+  "referred_to_advisor": false
+}
+
+Ako ne možeš odgovoriti iz dostavljenog konteksta:
+- answer: objasni da nemaš pouzdani odgovor i uputi na RRiF savjetničku liniju
+- citations: []
+- confidence: "low"
+- referred_to_advisor: true
+"""
+
+
+# ── Response data classes ─────────────────────────────────────────────────────
+
+@dataclass
+class Citation:
+    source: str
+    article_number: str | None = None
+    valid_from: str | None = None
+    valid_to: str | None = None
+    excerpt: str = ""
+
+
+@dataclass
+class QueryResponse:
+    answer: str
+    citations: list[Citation]
+    temporal_basis: str
+    confidence: Literal["high", "low"]
+    referred_to_advisor: bool
+    # Diagnostics (not shown to end users)
+    classifier: ClassifierResult = field(repr=False)
+    latency_ms: int = 0
+    tokens_in: int = 0
+    tokens_out: int = 0
+
+    def to_dict(self) -> dict:
+        """Serialise to plain dict for JSON output."""
+        return {
+            "answer": self.answer,
+            "citations": [
+                {
+                    "source": c.source,
+                    "article_number": c.article_number,
+                    "valid_from": c.valid_from,
+                    "valid_to": c.valid_to,
+                    "excerpt": c.excerpt,
+                }
+                for c in self.citations
+            ],
+            "temporal_basis": self.temporal_basis,
+            "confidence": self.confidence,
+            "referred_to_advisor": self.referred_to_advisor,
+            "meta": {
+                "category": self.classifier.category,
+                "time_period": self.classifier.time_period.type,
+                "latency_ms": self.latency_ms,
+                "tokens_in": self.tokens_in,
+                "tokens_out": self.tokens_out,
+            },
+        }
+
+
+# ── Retrieval ─────────────────────────────────────────────────────────────────
+
+def _retrieve(question: str, clf: ClassifierResult) -> list[tuple]:
+    """Hybrid retrieval (semantic + FTS) with classifier-driven filters.
+
+    Returns list of (chunk_id, chunk_text, source, article_number,
+                      valid_from, valid_to) tuples, up to CANDIDATES rows.
+    """
+    qvec = embed_query(question)
+    filters = clf.to_retrieval_filter()
+
+    # Build dynamic WHERE clauses from classifier output
+    where_clauses = ["citable = TRUE"]
+    params: list = []
+
+    if filters["category"]:
+        where_clauses.append("category = %s")
+        params.append(filters["category"])
+
+    # source_type filtering disabled — category filter is sufficient for now.
+    # Re-enable once psycopg array handling is confirmed working.
+    # if filters["source_types"]:
+    #     where_clauses.append("source_type = ANY(%s)")
+    #     params.append(list(filters["source_types"]))
+
+    sql_time = filters["sql_time_filter"]
+    if sql_time:
+        where_clauses.append(f"({sql_time})")
+
+    where_sql = " AND ".join(where_clauses)
+
+    # Use two separate connections: one plain (FTS) and one with pgvector registered.
+    # register_vector() changes the type adapter globally on the connection,
+    # causing psycopg to misinterpret plain text params as vectors.
+
+    # ── Connection 1: FTS (plain text params only) ───────────────────────────
+    fts_rows: dict = {}
+    words = [w for w in question.split() if len(w) >= 3]
+    if words:
+        tsquery = " | ".join(words)
+        try:
+            with psycopg.connect(os.environ["DATABASE_URL"]) as conn_fts:
+                with conn_fts.cursor() as cur:
+                    cur.execute(
+                        f"""
+                        SELECT id, chunk_text, source, article_number,
+                               valid_from::text, valid_to::text
+                        FROM chunks
+                        WHERE {where_sql}
+                          AND to_tsvector('simple', chunk_text)
+                              @@ to_tsquery('simple', %s)
+                        ORDER BY ts_rank_cd(
+                            to_tsvector('simple', chunk_text),
+                            to_tsquery('simple', %s)
+                        ) DESC
+                        LIMIT %s
+                        """,
+                        params + [tsquery, tsquery, CANDIDATES],
+                    )
+                    fts_rows = {row[0]: row for row in cur.fetchall()}
+        except Exception as e:
+            log.warning("FTS search failed: %s", e)
+
+    # ── Connection 2: Semantic search (pgvector registered) ──────────────────
+    with psycopg.connect(os.environ["DATABASE_URL"]) as conn_vec:
+        register_vector(conn_vec)
+        with conn_vec.cursor() as cur:
+            cur.execute(
+                f"""
+                SELECT id, chunk_text, source, article_number,
+                       valid_from::text, valid_to::text
+                FROM chunks
+                WHERE {where_sql}
+                ORDER BY embedding <=> %s
+                LIMIT %s
+                """,
+                params + [qvec, CANDIDATES],
+            )
+            sem_rows = {row[0]: row for row in cur.fetchall()}
+
+    # RRF fusion
+    sem_ranks = {rid: i + 1 for i, rid in enumerate(sem_rows)}
+    fts_ranks = {rid: i + 1 for i, rid in enumerate(fts_rows)}
+    all_ids = set(sem_ranks) | set(fts_ranks)
+
+    scored = []
+    for rid in all_ids:
+        score = 0.0
+        if rid in sem_ranks:
+            score += 1.0 / (RRF_K + sem_ranks[rid])
+        if rid in fts_ranks:
+            score += 1.0 / (RRF_K + fts_ranks[rid])
+        row = sem_rows.get(rid) or fts_rows.get(rid)
+        # (id, text, source, article_number, valid_from, valid_to)
+        scored.append((score, row[0], row[1], row[2], row[3], row[4], row[5]))
+
+    scored.sort(reverse=True)
+    # Return (chunk_id, text, source, article_number, valid_from, valid_to)
+    return [(r[1], r[2], r[3], r[4], r[5], r[6]) for r in scored[:CANDIDATES]]
+
+
+# ── Generation ────────────────────────────────────────────────────────────────
+
+def _build_context(chunks: list[tuple]) -> str:
+    """Format retrieved chunks as a readable context block for the LLM."""
+    parts = []
+    for i, (cid, text, source, article_no, valid_from, valid_to) in enumerate(chunks):
+        status = "VAŽEĆE" if valid_to is None else f"NEVAŽEĆE (do {valid_to})"
+        art = f", čl. {article_no}" if article_no else ""
+        header = f"[{i+1}] {status} | {source}{art}"
+        if valid_from:
+            header += f" | od {valid_from}"
+        parts.append(f"{header}\n{text}")
+    return "\n\n---\n\n".join(parts)
+
+
+def _generate(question: str, context: str, clf: ClassifierResult) -> tuple[QueryResponse, int, int]:
+    """Call Claude Sonnet to generate the answer. Returns (response, tokens_in, tokens_out)."""
+    import time
+
+    client = anthropic.Anthropic(api_key=os.environ["ANTHROPIC_API_KEY"])
+
+    today = date.today().isoformat()
+    user_message = dedent(f"""\
+        Kontekst iz baze znanja (preuzeto {today}):
+
+        {context}
+
+        ---
+
+        Pitanje: {question}
+
+        {RESPONSE_SCHEMA}
+    """)
+
+    t0 = time.perf_counter()
+    response = client.messages.create(
+        model=GENERATOR_MODEL,
+        max_tokens=1500,
+        system=SYSTEM_PROMPT,
+        messages=[{"role": "user", "content": user_message}],
+    )
+    latency_ms = int((time.perf_counter() - t0) * 1000)
+
+    raw_text = response.content[0].text.strip()
+    if raw_text.startswith("```"):
+        raw_text = raw_text.split("\n", 1)[-1]
+        raw_text = raw_text.rsplit("```", 1)[0].strip()
+    tokens_in = response.usage.input_tokens
+    tokens_out = response.usage.output_tokens
+
+    try:
+        data = json.loads(raw_text)
+    except json.JSONDecodeError:
+        log.warning("Generator returned invalid JSON, using fallback")
+        data = {
+            "answer": raw_text,
+            "citations": [],
+            "temporal_basis": f"Odgovor generiran {today}.",
+            "confidence": "low",
+            "referred_to_advisor": True,
+        }
+
+    citations = [
+        Citation(
+            source=c.get("source", ""),
+            article_number=c.get("article_number"),
+            valid_from=c.get("valid_from"),
+            valid_to=c.get("valid_to"),
+            excerpt=c.get("excerpt", "")[:200],
+        )
+        for c in data.get("citations", [])
+    ]
+
+    qr = QueryResponse(
+        answer=data.get("answer", ""),
+        citations=citations,
+        temporal_basis=data.get("temporal_basis", ""),
+        confidence=data.get("confidence", "low"),
+        referred_to_advisor=data.get("referred_to_advisor", False),
+        classifier=clf,
+        latency_ms=latency_ms,
+        tokens_in=tokens_in,
+        tokens_out=tokens_out,
+    )
+    return qr
+
+
+# ── Public API ────────────────────────────────────────────────────────────────
+
+def ask(question: str, verbose: bool = False) -> QueryResponse:
+    """Full RAG pipeline: classify → retrieve → rerank → generate.
+
+    Args:
+        question: User's question in Croatian.
+        verbose:  If True, log intermediate steps to stdout.
+
+    Returns:
+        QueryResponse with answer, citations, and diagnostics.
+    """
+    import time
+    t_start = time.perf_counter()
+
+    # Step 1: Classify
+    clf = classify(question)
+    if verbose:
+        print(f"[classifier] category={clf.category} | "
+              f"time={clf.time_period.type} | "
+              f"src_pref={clf.source_type_preference}")
+
+    # Step 2: Hybrid retrieval
+    candidates = _retrieve(question, clf)
+    if verbose:
+        print(f"[retrieval] {len(candidates)} candidates returned")
+
+    if not candidates:
+        # Nothing in DB — refuse immediately
+        from datetime import date as _date
+        return QueryResponse(
+            answer=(
+                "Nažalost, nisam pronašao relevantne informacije u bazi znanja. "
+                "Molim Vas obratite se RRiF savjetničkoj liniji za točan odgovor."
+            ),
+            citations=[],
+            temporal_basis=f"Pretraživanje provedeno {_date.today().isoformat()}.",
+            confidence="low",
+            referred_to_advisor=True,
+            classifier=clf,
+            latency_ms=int((time.perf_counter() - t_start) * 1000),
+        )
+
+    # Step 3: Rerank
+    rerank_input = [(row[0], row[1]) for row in candidates]
+    reranked = rerank(question, rerank_input, k=TOP_K)
+    if verbose:
+        print(f"[reranker] top {len(reranked)} chunks selected")
+
+    # Rebuild full rows for context (reranker only returns id + text + score)
+    meta_lookup = {row[0]: row for row in candidates}
+    top_chunks = []
+    for chunk_id, text, score in reranked:
+        row = meta_lookup.get(chunk_id)
+        if row:
+            top_chunks.append(row)
+
+    # Step 4: Generate
+    context = _build_context(top_chunks)
+    result = _generate(question, context, clf)
+
+    result.latency_ms = int((time.perf_counter() - t_start) * 1000)
+
+    if verbose:
+        print(f"[generator] confidence={result.confidence} | "
+              f"citations={len(result.citations)} | "
+              f"latency={result.latency_ms}ms | "
+              f"tokens={result.tokens_in}in/{result.tokens_out}out")
+
+    return result
+
+
+# ── CLI ───────────────────────────────────────────────────────────────────────
+
+if __name__ == "__main__":
+    import sys
+    logging.basicConfig(level=logging.WARNING)
+
+    question = " ".join(sys.argv[1:]) if len(sys.argv) > 1 else None
+    if not question:
+        print("Usage: python -m rag.query <question>")
+        print('Example: python -m rag.query "Koji je rok za predaju PDV obrasca?"')
+        sys.exit(1)
+
+    print(f"\nPitanje: {question}\n{'='*60}")
+    result = ask(question, verbose=True)
+    print(f"\n{'='*60}")
+    print(json.dumps(result.to_dict(), ensure_ascii=False, indent=2))

@@ -1,0 +1,195 @@
+"""Ingest RRiF magazine articles from the archive into the chunks table.
+
+Walks one or more archive folders (e.g. RRIF2404, PIP2401, RRIF2401...),
+loads each article with article_loader.py, and ingests into the RAG pipeline.
+
+Usage (PowerShell from project root):
+    # Single folder
+    python scripts\ingest_rrif_articles.py "C:\path\to\Arhiva\RRIF2404"
+
+    # Multiple folders
+    python scripts\ingest_rrif_articles.py "C:\path\to\Arhiva\RRIF2404" "C:\path\to\Arhiva\RRIF2403"
+
+    # Entire archive (all subfolders)
+    python scripts\ingest_rrif_articles.py "C:\path\to\Arhiva"
+
+    # Dry run — show what would be ingested without touching the DB
+    python scripts\ingest_rrif_articles.py "C:\path\to\Arhiva\RRIF2404" --dry-run
+
+Options:
+    --dry-run       Print chunk counts per file without writing to DB
+    --skip-existing Skip folders already ingested (checks DB for existing source citations)
+"""
+import argparse
+import sys
+from calendar import monthrange
+from datetime import date
+from pathlib import Path
+
+# Make 'rag' importable when running from project root
+sys.path.insert(0, str(Path(__file__).parent.parent))
+
+from rag.ingest.article_loader import load_article, PUB_TYPE
+from rag.ingest.pipeline import SourceMetadata, ingest
+
+# ── VALIDITY RULES ────────────────────────────────────────────────────────────
+# Articles are considered valid for the year they were published.
+# valid_to = last day of the publication year.
+# For 2014 issues (very old), we mark nevažeći immediately — still in corpus
+# for temporal queries but won't surface for current-law questions.
+CURRENT_YEAR = 2025  # articles from this year onward get valid_to=NULL (currently valid)
+HISTORICAL_CUTOFF = 2019  # articles before this year are nevažeći on ingest
+
+
+def _source_metadata(chunk) -> SourceMetadata:
+    """Build SourceMetadata from an ArticleChunk."""
+    year = chunk.year
+    month = chunk.month
+
+    # valid_from = first day of publication month
+    valid_from = date(year, month, 1)
+
+    # valid_to = last day of publication year (or NULL if current)
+    if year >= CURRENT_YEAR:
+        valid_to = None
+        status = "važeći"
+    else:
+        last_day = monthrange(year, 12)[1]
+        valid_to = date(year, 12, last_day)
+        status = "nevažeći" if year < HISTORICAL_CUTOFF else "važeći"
+
+    return SourceMetadata(
+        category=chunk.default_category,
+        source_type="članak",
+        source=chunk.source_citation,
+        law_name=None,
+        nn_reference=None,
+        valid_from=valid_from,
+        valid_to=valid_to,
+        status=status,
+        citable=True,
+        extra_metadata={
+            "pub_type": chunk.pub_type,
+            "pub_label": chunk.pub_label,
+            "article_num": chunk.article_num,
+            "author": chunk.author or "",
+            "title": chunk.title,
+        },
+    )
+
+
+def collect_pdfs(roots: list[Path]) -> list[Path]:
+    """Collect all PDFs from given paths (files or folders, recursively one level)."""
+    pdfs = []
+    for root in roots:
+        if root.is_file() and root.suffix.upper() == ".PDF":
+            pdfs.append(root)
+        elif root.is_dir():
+            # Check if this is a leaf folder (e.g. RRIF2404) or a parent (e.g. Arhiva)
+            sub_pdfs = list(root.glob("*.PDF")) + list(root.glob("*.pdf"))
+            if sub_pdfs:
+                # Leaf folder — collect directly
+                pdfs.extend(sub_pdfs)
+            else:
+                # Parent folder — recurse one level into subfolders
+                for sub in sorted(root.iterdir()):
+                    if sub.is_dir():
+                        pdfs.extend(sorted(sub.glob("*.PDF")))
+                        pdfs.extend(sorted(sub.glob("*.pdf")))
+    return sorted(set(pdfs))
+
+
+def run(roots: list[Path], dry_run: bool = False):
+    pdfs = collect_pdfs(roots)
+    if not pdfs:
+        print("No PDF files found.")
+        return
+
+    print(f"\n{'='*65}")
+    print(f"  RRiF Article Ingestion")
+    print(f"  Mode: {'DRY RUN' if dry_run else 'LIVE — writing to database'}")
+    print(f"  PDFs found: {len(pdfs)}")
+    print(f"{'='*65}\n")
+
+    total_files = 0
+    total_skipped = 0
+    total_chunks = 0
+    total_inserted = 0
+    errors = []
+
+    for pdf in pdfs:
+        folder_name = pdf.parent.name
+
+        result = load_article(pdf, verbose=False)
+
+        if result is None:
+            total_skipped += 1
+            continue
+
+        if not result:
+            total_skipped += 1
+            continue
+
+        total_files += 1
+        total_chunks += len(result)
+
+        first = result[0]
+        label = f"{folder_name}/{pdf.name}"
+        print(f"  {label:35s}  {len(result):3d} chunks  {first.title[:50]}")
+
+        if dry_run:
+            continue
+
+        # All chunks in one article share the same SourceMetadata
+        # (same pub date, category, citation prefix)
+        meta = _source_metadata(first)
+
+        # The pipeline's ingest() expects ArticleChunk-like objects with .text and .article_number
+        # Our ArticleChunk has .text but not .article_number — wrap for compatibility
+        class _WrappedChunk:
+            def __init__(self, c):
+                self.text = c.text
+                self.article_number = c.section_num  # use section number as article_number
+                self.chunk_index = c.chunk_index
+
+        wrapped = [_WrappedChunk(c) for c in result]
+
+        try:
+            n = ingest(wrapped, meta)
+            total_inserted += n
+        except Exception as e:
+            errors.append((label, str(e)))
+            print(f"    ⚠️  ERROR: {e}")
+
+    print(f"\n{'='*65}")
+    print(f"  SUMMARY")
+    print(f"  Files processed : {total_files + total_skipped}")
+    print(f"  Skipped         : {total_skipped}  (ads, editorials, short files)")
+    print(f"  Articles loaded : {total_files}")
+    print(f"  Chunks produced : {total_chunks}")
+    if not dry_run:
+        print(f"  Rows inserted   : {total_inserted}")
+    if errors:
+        print(f"\n  ERRORS ({len(errors)}):")
+        for label, err in errors:
+            print(f"    {label}: {err}")
+    print(f"{'='*65}\n")
+
+
+if __name__ == "__main__":
+    parser = argparse.ArgumentParser(
+        description="Ingest RRiF magazine articles into the RAG knowledge base."
+    )
+    parser.add_argument(
+        "paths",
+        nargs="+",
+        help="Folder(s) to ingest — can be individual issue folders (RRIF2404) or a parent archive folder",
+    )
+    parser.add_argument(
+        "--dry-run",
+        action="store_true",
+        help="Show what would be ingested without writing to the database",
+    )
+    args = parser.parse_args()
+
+    run([Path(p) for p in args.paths], dry_run=args.dry_run)
