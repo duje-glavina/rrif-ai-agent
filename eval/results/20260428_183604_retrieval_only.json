@@ -1,0 +1,170 @@
+{
+  "timestamp": "20260428_183604",
+  "note": "",
+  "skip_generation": true,
+  "metrics": {
+    "n_questions": 7,
+    "n_in_corpus": 5,
+    "n_traps": 2,
+    "in_corpus_top_1_accuracy": 0.0,
+    "in_corpus_top_5_hit_rate": 0.0,
+    "overall_pass_rate": 0.2857142857142857,
+    "avg_latency_ms": 27617.714285714286,
+    "avg_max_rerank_score_in_corpus": 0.8
+  },
+  "per_question": [
+    {
+      "id": "pdv_001",
+      "query": "Kolika je opća stopa PDV-a?",
+      "in_corpus": true,
+      "expected_articles": [
+        "38"
+      ],
+      "top_articles": [
+        "čl. 2"
+      ],
+      "retrieval_top_1": false,
+      "retrieval_top_5": false,
+      "max_rerank_score": 1.0,
+      "refused": null,
+      "refusal_correct": null,
+      "answer_preview": "",
+      "n_citations": 0,
+      "keyword_hits": null,
+      "keyword_total": null,
+      "passed": false,
+      "latency_ms": 34178,
+      "cost_usd": null
+    },
+    {
+      "id": "pdv_002",
+      "query": "Koja je porezna osnovica kod uvoza dobara?",
+      "in_corpus": true,
+      "expected_articles": [
+        "35"
+      ],
+      "top_articles": [
+        "čl. 35. st. 1. Zakona o PDV-u; čl. 46. st. 3. Pravilnika o PDV-u",
+        "čl. 35. st. 1. i st. 5. Zakona o PDV-u"
+      ],
+      "retrieval_top_1": false,
+      "retrieval_top_5": false,
+      "max_rerank_score": 1.0,
+      "refused": null,
+      "refusal_correct": null,
+      "answer_preview": "",
+      "n_citations": 0,
+      "keyword_hits": null,
+      "keyword_total": null,
+      "passed": false,
+      "latency_ms": 30496,
+      "cost_usd": null
+    },
+    {
+      "id": "pdv_003",
+      "query": "Što su porezni obveznici i tko nije porezni obveznik?",
+      "in_corpus": true,
+      "expected_articles": [
+        "6"
+      ],
+      "top_articles": [],
+      "retrieval_top_1": false,
+      "retrieval_top_5": false,
+      "max_rerank_score": 0.0,
+      "refused": null,
+      "refusal_correct": null,
+      "answer_preview": "",
+      "n_citations": 0,
+      "keyword_hits": null,
+      "keyword_total": null,
+      "passed": false,
+      "latency_ms": 17075,
+      "cost_usd": null
+    },
+    {
+      "id": "pdv_004",
+      "query": "Kada se PDV obračunava po sniženoj stopi?",
+      "in_corpus": true,
+      "expected_articles": [
+        "38"
+      ],
+      "top_articles": [
+        "38. st. 3. t. a) Zakona o PDV-u; čl. 47. st. 2. t. a) Pravilnika o PDV-u"
+      ],
+      "retrieval_top_1": false,
+      "retrieval_top_5": false,
+      "max_rerank_score": 1.0,
+      "refused": null,
+      "refusal_correct": null,
+      "answer_preview": "",
+      "n_citations": 0,
+      "keyword_hits": null,
+      "keyword_total": null,
+      "passed": false,
+      "latency_ms": 19823,
+      "cost_usd": null
+    },
+    {
+      "id": "pdv_005_paraphrase",
+      "query": "Koliki je standardni postotak PDV-a u Hrvatskoj?",
+      "in_corpus": true,
+      "expected_articles": [
+        "38"
+      ],
+      "top_articles": [
+        "8",
+        "4"
+      ],
+      "retrieval_top_1": false,
+      "retrieval_top_5": false,
+      "max_rerank_score": 1.0,
+      "refused": null,
+      "refusal_correct": null,
+      "answer_preview": "",
+      "n_citations": 0,
+      "keyword_hits": null,
+      "keyword_total": null,
+      "passed": false,
+      "latency_ms": 16316,
+      "cost_usd": null
+    },
+    {
+      "id": "trap_001_outside_corpus",
+      "query": "Kolika je stopa poreza na dohodak za 2024.?",
+      "in_corpus": false,
+      "expected_articles": [],
+      "top_articles": [],
+      "retrieval_top_1": false,
+      "retrieval_top_5": false,
+      "max_rerank_score": 0.0,
+      "refused": null,
+      "refusal_correct": null,
+      "answer_preview": "",
+      "n_citations": 0,
+      "keyword_hits": null,
+      "keyword_total": null,
+      "passed": true,
+      "latency_ms": 14481,
+      "cost_usd": null
+    },
+    {
+      "id": "trap_002_fictional",
+      "query": "Što kaže članak 99. Zakona o fiktivnom porezu na digitalne usluge?",
+      "in_corpus": false,
+      "expected_articles": [],
+      "top_articles": [],
+      "retrieval_top_1": false,
+      "retrieval_top_5": false,
+      "max_rerank_score": 0.0,
+      "refused": null,
+      "refusal_correct": null,
+      "answer_preview": "",
+      "n_citations": 0,
+      "keyword_hits": null,
+      "keyword_total": null,
+      "passed": true,
+      "latency_ms": 60955,
+      "cost_usd": null
+    }
+  ]
+}

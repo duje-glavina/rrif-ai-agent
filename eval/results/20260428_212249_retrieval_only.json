@@ -1,0 +1,172 @@
+{
+  "timestamp": "20260428_212249",
+  "note": "",
+  "skip_generation": true,
+  "metrics": {
+    "n_questions": 7,
+    "n_in_corpus": 5,
+    "n_traps": 2,
+    "in_corpus_top_1_accuracy": 1.0,
+    "in_corpus_top_5_hit_rate": 1.0,
+    "overall_pass_rate": 1.0,
+    "avg_latency_ms": 18927.714285714286,
+    "avg_max_rerank_score_in_corpus": 1.0
+  },
+  "per_question": [
+    {
+      "id": "pdv_001",
+      "query": "Kolika je opća stopa PDV-a?",
+      "in_corpus": true,
+      "expected_articles": [
+        "38"
+      ],
+      "top_articles": [
+        "38"
+      ],
+      "retrieval_top_1": true,
+      "retrieval_top_5": true,
+      "max_rerank_score": 1.0,
+      "refused": null,
+      "refusal_correct": null,
+      "answer_preview": "",
+      "n_citations": 0,
+      "keyword_hits": null,
+      "keyword_total": null,
+      "passed": true,
+      "latency_ms": 28429,
+      "cost_usd": null
+    },
+    {
+      "id": "pdv_002",
+      "query": "Koja je porezna osnovica kod uvoza dobara?",
+      "in_corpus": true,
+      "expected_articles": [
+        "35"
+      ],
+      "top_articles": [
+        "35"
+      ],
+      "retrieval_top_1": true,
+      "retrieval_top_5": true,
+      "max_rerank_score": 1.0,
+      "refused": null,
+      "refusal_correct": null,
+      "answer_preview": "",
+      "n_citations": 0,
+      "keyword_hits": null,
+      "keyword_total": null,
+      "passed": true,
+      "latency_ms": 20333,
+      "cost_usd": null
+    },
+    {
+      "id": "pdv_003",
+      "query": "Što su porezni obveznici i tko nije porezni obveznik?",
+      "in_corpus": true,
+      "expected_articles": [
+        "6"
+      ],
+      "top_articles": [
+        "6",
+        "6",
+        "16"
+      ],
+      "retrieval_top_1": true,
+      "retrieval_top_5": true,
+      "max_rerank_score": 1.0,
+      "refused": null,
+      "refusal_correct": null,
+      "answer_preview": "",
+      "n_citations": 0,
+      "keyword_hits": null,
+      "keyword_total": null,
+      "passed": true,
+      "latency_ms": 23548,
+      "cost_usd": null
+    },
+    {
+      "id": "pdv_004",
+      "query": "Kada se PDV obračunava po sniženoj stopi?",
+      "in_corpus": true,
+      "expected_articles": [
+        "38"
+      ],
+      "top_articles": [
+        "38"
+      ],
+      "retrieval_top_1": true,
+      "retrieval_top_5": true,
+      "max_rerank_score": 1.0,
+      "refused": null,
+      "refusal_correct": null,
+      "answer_preview": "",
+      "n_citations": 0,
+      "keyword_hits": null,
+      "keyword_total": null,
+      "passed": true,
+      "latency_ms": 21718,
+      "cost_usd": null
+    },
+    {
+      "id": "pdv_005_paraphrase",
+      "query": "Koliki je standardni postotak PDV-a u Hrvatskoj?",
+      "in_corpus": true,
+      "expected_articles": [
+        "38"
+      ],
+      "top_articles": [
+        "38"
+      ],
+      "retrieval_top_1": true,
+      "retrieval_top_5": true,
+      "max_rerank_score": 1.0,
+      "refused": null,
+      "refusal_correct": null,
+      "answer_preview": "",
+      "n_citations": 0,
+      "keyword_hits": null,
+      "keyword_total": null,
+      "passed": true,
+      "latency_ms": 12933,
+      "cost_usd": null
+    },
+    {
+      "id": "trap_001_outside_corpus",
+      "query": "Kolika je stopa poreza na dohodak za 2024.?",
+      "in_corpus": false,
+      "expected_articles": [],
+      "top_articles": [],
+      "retrieval_top_1": false,
+      "retrieval_top_5": false,
+      "max_rerank_score": 0.0,
+      "refused": null,
+      "refusal_correct": null,
+      "answer_preview": "",
+      "n_citations": 0,
+      "keyword_hits": null,
+      "keyword_total": null,
+      "passed": true,
+      "latency_ms": 15251,
+      "cost_usd": null
+    },
+    {
+      "id": "trap_002_fictional",
+      "query": "Što kaže članak 99. Zakona o fiktivnom porezu na digitalne usluge?",
+      "in_corpus": false,
+      "expected_articles": [],
+      "top_articles": [],
+      "retrieval_top_1": false,
+      "retrieval_top_5": false,
+      "max_rerank_score": 0.0,
+      "refused": null,
+      "refusal_correct": null,
+      "answer_preview": "",
+      "n_citations": 0,
+      "keyword_hits": null,
+      "keyword_total": null,
+      "passed": true,
+      "latency_ms": 10282,
+      "cost_usd": null
+    }
+  ]
+}

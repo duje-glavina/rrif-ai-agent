@@ -1,0 +1,176 @@
+{
+  "timestamp": "20260428_213218",
+  "note": "baseline-real-data",
+  "skip_generation": false,
+  "metrics": {
+    "n_questions": 7,
+    "n_in_corpus": 5,
+    "n_traps": 2,
+    "in_corpus_top_1_accuracy": 1.0,
+    "in_corpus_top_5_hit_rate": 1.0,
+    "overall_pass_rate": 1.0,
+    "avg_latency_ms": 18761.428571428572,
+    "avg_max_rerank_score_in_corpus": 1.0,
+    "in_corpus_no_false_refusal_rate": 1.0,
+    "trap_refusal_rate": 1.0,
+    "avg_cost_usd": 0.021874285714285714,
+    "total_cost_usd": 0.15312
+  },
+  "per_question": [
+    {
+      "id": "pdv_001",
+      "query": "Kolika je opća stopa PDV-a?",
+      "in_corpus": true,
+      "expected_articles": [
+        "38"
+      ],
+      "top_articles": [
+        "38"
+      ],
+      "retrieval_top_1": true,
+      "retrieval_top_5": true,
+      "max_rerank_score": 1.0,
+      "refused": false,
+      "refusal_correct": true,
+      "answer_preview": "Opća stopa PDV-a u Hrvatskoj iznosi 25%. PDV se obračunava i plaća po toj stopi na sve isporuke dobara i usluga za koje nije propisana snižena stopa (5% ili 10%).",
+      "n_citations": 1,
+      "keyword_hits": 0,
+      "keyword_total": 0,
+      "passed": true,
+      "latency_ms": 29850,
+      "cost_usd": 0.012342
+    },
+    {
+      "id": "pdv_002",
+      "query": "Koja je porezna osnovica kod uvoza dobara?",
+      "in_corpus": true,
+      "expected_articles": [
+        "35"
+      ],
+      "top_articles": [
+        "35"
+      ],
+      "retrieval_top_1": true,
+      "retrieval_top_5": true,
+      "max_rerank_score": 1.0,
+      "refused": false,
+      "refusal_correct": true,
+      "answer_preview": "Porezna osnovica kod uvoza dobara utvrđuje se prema sljedećim pravilima (čl. 35. Zakona o PDV-u):\n\n1. **Osnova**: Poreznu osnovicu čini **carinska vrijednost** utvrđena prema carinskim propisima.\n\n2. **Dodaci koji se uključuju** (ako nisu već uključeni u carinsku vrijednost):\n   - Porezi, carine, pr",
+      "n_citations": 1,
+      "keyword_hits": 0,
+      "keyword_total": 0,
+      "passed": true,
+      "latency_ms": 22886,
+      "cost_usd": 0.025821
+    },
+    {
+      "id": "pdv_003",
+      "query": "Što su porezni obveznici i tko nije porezni obveznik?",
+      "in_corpus": true,
+      "expected_articles": [
+        "6"
+      ],
+      "top_articles": [
+        "6",
+        "6",
+        "16"
+      ],
+      "retrieval_top_1": true,
+      "retrieval_top_5": true,
+      "max_rerank_score": 1.0,
+      "refused": false,
+      "refusal_correct": true,
+      "answer_preview": "Prema Zakonu o porezu na dodanu vrijednost (NN 73/2013), pojam poreznog obveznika i iznimke definirani su u članku 6.:\n\n**Tko je porezni obveznik:**\nPorezni obveznik je svaka osoba koja samostalno obavlja bilo koju gospodarsku djelatnost, bez obzira na svrhu i rezultat obavljanja te djelatnosti (čl.",
+      "n_citations": 3,
+      "keyword_hits": 0,
+      "keyword_total": 0,
+      "passed": true,
+      "latency_ms": 22570,
+      "cost_usd": 0.02562
+    },
+    {
+      "id": "pdv_004",
+      "query": "Kada se PDV obračunava po sniženoj stopi?",
+      "in_corpus": true,
+      "expected_articles": [
+        "38"
+      ],
+      "top_articles": [
+        "38"
+      ],
+      "retrieval_top_1": true,
+      "retrieval_top_5": true,
+      "max_rerank_score": 1.0,
+      "refused": false,
+      "refusal_correct": true,
+      "answer_preview": "PDV se obračunava i plaća po sniženoj stopi od 5% na isporuke sljedećih dobara i usluga:\n\na) sve vrste kruha,\nb) sve vrste mlijeka (kravlje, ovčje, kozje) u tekućem stanju – svježe, pasterizirano, homogenizirano, kondenzirano (osim kiselog mlijeka, jogurta, kera, čokoladnog mlijeka i drugih mliječni",
+      "n_citations": 1,
+      "keyword_hits": 0,
+      "keyword_total": 0,
+      "passed": true,
+      "latency_ms": 20333,
+      "cost_usd": 0.019257
+    },
+    {
+      "id": "pdv_005_paraphrase",
+      "query": "Koliki je standardni postotak PDV-a u Hrvatskoj?",
+      "in_corpus": true,
+      "expected_articles": [
+        "38"
+      ],
+      "top_articles": [
+        "38"
+      ],
+      "retrieval_top_1": true,
+      "retrieval_top_5": true,
+      "max_rerank_score": 1.0,
+      "refused": false,
+      "refusal_correct": true,
+      "answer_preview": "Standardna (opća) stopa PDV-a u Hrvatskoj iznosi 25%. Uz nju postoje i dvije snižene stope: 5% (npr. za kruh, mlijeko, knjige, lijekove, kino ulaznice) i 10% (npr. za ugostiteljske usluge, novine, jestiva ulja, vodu iz vodovoda).",
+      "n_citations": 1,
+      "keyword_hits": 0,
+      "keyword_total": 0,
+      "passed": true,
+      "latency_ms": 11975,
+      "cost_usd": 0.019422
+    },
+    {
+      "id": "trap_001_outside_corpus",
+      "query": "Kolika je stopa poreza na dohodak za 2024.?",
+      "in_corpus": false,
+      "expected_articles": [],
+      "top_articles": [],
+      "retrieval_top_1": false,
+      "retrieval_top_5": false,
+      "max_rerank_score": 0.0,
+      "refused": true,
+      "refusal_correct": true,
+      "answer_preview": "U dostavljenim dokumentima nisu pronađene informacije o stopama poreza na dohodak za 2024. godinu (npr. stopa od 20% ili 30% koja se primjenjuje na dohodak fizičkih osoba). Dokumenti se uglavnom odnose na zatezne kamate, doprinose za MIO, inozemni dohodak i minimalni globalni porez za multinacionaln",
+      "n_citations": 0,
+      "keyword_hits": null,
+      "keyword_total": null,
+      "passed": true,
+      "latency_ms": 13266,
+      "cost_usd": 0.034422
+    },
+    {
+      "id": "trap_002_fictional",
+      "query": "Što kaže članak 99. Zakona o fiktivnom porezu na digitalne usluge?",
+      "in_corpus": false,
+      "expected_articles": [],
+      "top_articles": [],
+      "retrieval_top_1": false,
+      "retrieval_top_5": false,
+      "max_rerank_score": 0.0,
+      "refused": true,
+      "refusal_correct": true,
+      "answer_preview": "Ne mogu odgovoriti na ovo pitanje. U dostavljenim dokumentima ne postoji 'Zakon o fiktivnom porezu na digitalne usluge' niti se u kontekstu spominje članak 99. takvog zakona. Naziv zakona koji navodite ('Zakon o fiktivnom porezu na digitalne usluge') ne postoji u dostavljenoj bazi znanja niti je, pr",
+      "n_citations": 0,
+      "keyword_hits": null,
+      "keyword_total": null,
+      "passed": true,
+      "latency_ms": 10450,
+      "cost_usd": 0.016236
+    }
+  ]
+}

@@ -1,0 +1,65 @@
+# Golden evaluation set for the RRiF AI Agent.
+#
+# Each entry has:
+#   id                : stable identifier, do not rename casually
+#   query             : the user question, in Croatian
+#   expected_articles : list of article numbers from the corpus that should appear
+#                       in top-k for the answer to be considered correct.
+#                       Use [] for trap questions where the system should refuse.
+#   category          : expected classification (PDV, dohodak, etc.) — used later
+#                       when we add the classifier.
+#   in_corpus         : true if the answer is in the corpus, false for traps.
+#   notes             : free-form, why this question is in the set
+#
+# Adding new questions: every time the agent fails on a real question, the
+# right move is to add it here with the correct expected_articles and iterate
+# until eval passes.
+
+- id: pdv_001
+  query: "Kolika je opća stopa PDV-a?"
+  expected_articles: ["38"]
+  category: PDV
+  in_corpus: true
+  notes: "General rate, single-article answer. Easy baseline."
+
+- id: pdv_002
+  query: "Koja je porezna osnovica kod uvoza dobara?"
+  expected_articles: ["35"]
+  category: PDV
+  in_corpus: true
+  notes: "Tests discrimination from Članak 34 (porezna osnovica kod stjecanja — adjacent topic)."
+
+- id: pdv_003
+  query: "Što su porezni obveznici i tko nije porezni obveznik?"
+  expected_articles: ["6"]
+  category: PDV
+  in_corpus: true
+  notes: "Definition question. Članak 6 is split into multiple chunks; either should count."
+
+- id: pdv_004
+  query: "Kada se PDV obračunava po sniženoj stopi?"
+  expected_articles: ["38"]
+  category: PDV
+  in_corpus: true
+  notes: "Tests discrimination from Članak 37 (when the rate applies — adjacent but wrong)."
+
+- id: pdv_005_paraphrase
+  query: "Koliki je standardni postotak PDV-a u Hrvatskoj?"
+  expected_articles: ["38"]
+  category: PDV
+  in_corpus: true
+  notes: "Paraphrase of pdv_001. 'standardni postotak' instead of 'opća stopa' — tests semantic robustness."
+
+- id: trap_001_outside_corpus
+  query: "Kolika je stopa poreza na dohodak za 2024.?"
+  expected_articles: []
+  category: dohodak
+  in_corpus: false
+  notes: "Trap. Zakon o porezu na dohodak is not in the corpus yet. Agent should refuse gracefully."
+
+- id: trap_002_fictional
+  query: "Što kaže članak 99. Zakona o fiktivnom porezu na digitalne usluge?"
+  expected_articles: []
+  category: ostalo
+  in_corpus: false
+  notes: "Trap. Cited law does not exist. Agent must not hallucinate an answer."

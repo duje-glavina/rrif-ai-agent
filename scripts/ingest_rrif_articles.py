@@ -31,6 +31,8 @@ sys.path.insert(0, str(Path(__file__).parent.parent))
 
 from rag.ingest.article_loader import load_article, PUB_TYPE
 from rag.ingest.pipeline import SourceMetadata, ingest
+from rag.classifier import STATUS_VALID, STATUS_INVALID
+
 
 # ── VALIDITY RULES ────────────────────────────────────────────────────────────
 # Articles are considered valid for the year they were published.
@@ -52,11 +54,11 @@ def _source_metadata(chunk) -> SourceMetadata:
     # valid_to = last day of publication year (or NULL if current)
     if year >= CURRENT_YEAR:
         valid_to = None
-        status = "važeći"
+        status = STATUS_VALID
     else:
         last_day = monthrange(year, 12)[1]
         valid_to = date(year, 12, last_day)
-        status = "nevažeći" if year < HISTORICAL_CUTOFF else "važeći"
+        status = STATUS_INVALID if year < HISTORICAL_CUTOFF else STATUS_VALID
 
     return SourceMetadata(
         category=chunk.default_category,

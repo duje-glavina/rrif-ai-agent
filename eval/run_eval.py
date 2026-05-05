@@ -18,6 +18,7 @@ import re
 import sys
 from datetime import datetime, timezone
 from pathlib import Path
+from unittest import result
 
 import yaml
 
@@ -79,6 +80,12 @@ def _keyword_hits(answer_text: str, keywords: list[str]) -> tuple[int, int]:
 def evaluate_one(item: dict, *, skip_generation: bool) -> dict:
     """Run one question through the full pipeline and grade the result."""
     result = ask(item["query"])
+    # Classifier grading (new in v2)
+    expected_cat = item.get("expected_category")
+    actual_cat = result.classifier.category
+    category_correct = (
+        expected_cat is not None and actual_cat == expected_cat
+    )
 
     # Normalize article numbers from citations for comparison
     top_articles = [
@@ -149,6 +156,9 @@ def evaluate_one(item: dict, *, skip_generation: bool) -> dict:
         "retrieval_top_5": retrieval_top_5,
         "max_rerank_score": max_score,
         "refused": result.referred_to_advisor if not skip_generation else None,
+        "expected_category": expected_cat,
+        "actual_category": actual_cat,
+        "category_correct": category_correct,
         "refusal_correct": refusal_correct,
         "answer_preview": answer_text[:300] if answer_text else "",
         "n_citations": len(citations_raw),
@@ -189,6 +199,18 @@ def aggregate(per_question: list[dict]) -> dict:
             if in_corpus else None
         ),
     }
+    # Classifier accuracy: only meaningful for non-trap questions where
+    # we have a definitive expected category. Trap questions should hit
+    # 'ostalo' and refuse — graded separately by trap_refusal_rate.
+    in_corpus_with_cat = [
+        r for r in per_question
+        if r["in_corpus"] and r["expected_category"] is not None
+    ]
+    if in_corpus_with_cat:
+        metrics["classifier_accuracy"] = (
+            sum(r["category_correct"] for r in in_corpus_with_cat)
+            / len(in_corpus_with_cat)
+        )
 
     if has_generation:
         metrics["in_corpus_no_false_refusal_rate"] = (
@@ -227,9 +249,12 @@ def main():
         per_question.append(result)
         verdict = "✅ pass" if result["passed"] else "❌ fail"
         bits = [
+            f"cat: {result.get('actual_category')}",
             f"top: {result['top_articles'][:3]}",
             f"score={result['max_rerank_score']:.3f}",
         ]
+        if result.get("expected_category") and not result.get("category_correct"):
+            bits.append(f"⚠ expected_cat={result['expected_category']}")
         if result["refused"] is not None:
             bits.append(f"refused={result['refused']}")
         if result["cost_usd"] is not None:
@@ -246,6 +271,8 @@ def main():
     print("=" * 70)
     print(f"  Top-1 retrieval accuracy:      {metrics['in_corpus_top_1_accuracy']:.1%}")
     print(f"  Top-5 retrieval hit rate:      {metrics['in_corpus_top_5_hit_rate']:.1%}")
+    if "classifier_accuracy" in metrics:
+        print(f"  Classifier accuracy:           {metrics['classifier_accuracy']:.1%}")
     if "trap_refusal_rate" in metrics:
         print(f"  Trap refusal rate:             {metrics['trap_refusal_rate']:.1%}")
         print(f"  No-false-refusal rate (real):  {metrics['in_corpus_no_false_refusal_rate']:.1%}")

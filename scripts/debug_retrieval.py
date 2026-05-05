@@ -30,10 +30,10 @@ with psycopg.connect(os.environ["DATABASE_URL"]) as conn:
     register_vector(conn)
     with conn.cursor() as cur:
         cur.execute(
-            "SELECT count(*) FROM chunks WHERE citable = TRUE AND category = %s AND status = 'važeći'",
+            "SELECT count(*) FROM chunks WHERE citable = TRUE AND category = %s AND status = 'vazeci'",
             ("PDV",)
         )
-        print(f"\nTest 2 — count with category=PDV AND status=važeći: {cur.fetchone()[0]}")
+        print(f"\nTest 2 — count with category=PDV AND status=vazeci: {cur.fetchone()[0]}")
 
         cur.execute(
             "SELECT count(*) FROM chunks WHERE citable = TRUE AND category = %s",

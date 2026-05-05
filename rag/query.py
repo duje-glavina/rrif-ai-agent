@@ -260,7 +260,10 @@ def _generate(question: str, context: str, clf: ClassifierResult) -> tuple[Query
     """Call Claude Sonnet to generate the answer. Returns (response, tokens_in, tokens_out)."""
     import time
 
-    client = anthropic.Anthropic(api_key=os.environ["ANTHROPIC_API_KEY"])
+    client = anthropic.Anthropic(
+    api_key=os.environ["ANTHROPIC_API_KEY"],
+    timeout=60.0,  # one minute is plenty for 1500-token generation
+)
 
     today = date.today().isoformat()
     user_message = dedent(f"""\
