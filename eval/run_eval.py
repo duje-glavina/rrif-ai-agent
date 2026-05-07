@@ -18,7 +18,7 @@ import re
 import sys
 from datetime import datetime, timezone
 from pathlib import Path
-
+from concurrent.futures import ThreadPoolExecutor, as_completed
 
 import yaml
 
@@ -275,32 +275,50 @@ def main():
     parser.add_argument("--note", default="", help="Free-form label for the results filename")
     parser.add_argument("--skip-generation", action="store_true",
                         help="Classify + retrieve only, skip answer generation (saves API cost)")
+    parser.add_argument("--workers", type=int, default=5, help="Parallel workers")
+
+    
     args = parser.parse_args()
 
     golden = load_golden_set()
     print(f"Loaded {len(golden)} questions from {GOLDEN_SET_PATH}\n")
+    print("Warming up models...")
+    from rag.embedder import _get_model as _warm_embedder
+    from rag.retrieve.rerank import _get_model as _warm_reranker
+    _warm_embedder()
+    _warm_reranker()
+    print("Models ready.\n")
 
-    per_question = []
-    for i, item in enumerate(golden, start=1):
-        print(f"[{i}/{len(golden)}] {item['id']}: {item['query']}")
-        result = evaluate_one(item, skip_generation=args.skip_generation)
-        per_question.append(result)
-        verdict = "✅ pass" if result["passed"] else "❌ fail"
-        bits = [
-            f"cat: {result.get('actual_category')}",
-            f"top: {result['top_articles'][:3]}",
-            f"score={result['max_rerank_score']:.3f}",
-        ]
-        if result.get("expected_category") and not result.get("category_correct"):
-            bits.append(f"⚠ expected_cat={result['expected_category']}")
-        if result["refused"] is not None:
-            bits.append(f"refused={result['refused']}")
-        if result["cost_usd"] is not None:
-            bits.append(f"${result['cost_usd']:.5f}")
-        print(f"    {verdict}  {'  '.join(bits)}")
-        if result["answer_preview"]:
-            print(f"    ↳ {result['answer_preview'][:200]}")
-        print()
+    per_question = [None] * len(golden)
+
+    with ThreadPoolExecutor(max_workers=args.workers) as executor:
+        futures = {
+            executor.submit(evaluate_one, item, skip_generation=args.skip_generation): i
+            for i, item in enumerate(golden)
+        }
+        for future in as_completed(futures):
+            i = futures[future]
+            item = golden[i]
+            result = future.result()
+            per_question[i] = result
+            # same print block as before, just use i+1 for display
+            verdict = "✅ pass" if result["passed"] else "❌ fail"
+            bits = [
+                f"cat: {result.get('actual_category')}",
+                f"top: {result['top_articles'][:3]}",
+                f"score={result['max_rerank_score']:.3f}",
+            ]
+            if result.get("expected_category") and not result.get("category_correct"):
+                bits.append(f"⚠ expected_cat={result['expected_category']}")
+            if result["refused"] is not None:
+                bits.append(f"refused={result['refused']}")
+            if result["cost_usd"] is not None:
+                bits.append(f"${result['cost_usd']:.5f}")
+            print(f"[{i+1}/{len(golden)}] {item['id']}: {item['query']}")
+            print(f"    {verdict}  {'  '.join(bits)}")
+            if result["answer_preview"]:
+                print(f"    ↳ {result['answer_preview'][:200]}")
+            print()
 
     metrics = aggregate(per_question)
 
