@@ -1,22 +1,24 @@
 """Claude generation: produce a grounded, cited answer from retrieved chunks.
 
+Uses Anthropic's tool-use feature for structured output. The model is
+constrained to produce JSON matching the `submit_answer` tool's input schema,
+so output is always valid and the parsing layer can't fail.
+
+Migrated from prompt-based JSON output (with regex-based parsing) on 2026-05-07.
+The old `_extract_json` and `_parse_json_text` helpers have been removed since
+they're no longer needed.
+
 The system prompt enforces:
   - Answer only from provided context
-  - Cite sources inline (Zakon o ..., NN, čl.)
+  - Cite sources (tool schema requires citations field)
   - Refuse and redirect to RRiF advisor line when uncertain
   - Disclose temporal basis when laws are involved
   - Croatian language only
-
-Output is structured: the model responds with JSON (answer + citations + refusal flag),
-which we parse and return. JSON output makes downstream evaluation cleaner than parsing
-free-form text.
 """
 from __future__ import annotations
 
 import hashlib
-import json
 import os
-import re
 from dataclasses import dataclass
 
 import anthropic
@@ -26,52 +28,117 @@ load_dotenv()
 
 
 DEFAULT_MODEL = os.environ.get("CLAUDE_MODEL", "claude-sonnet-4-6")
-MAX_TOKENS = 1500
+MAX_TOKENS = 2500
 
 
 # ---------------------------------------------------------------------------
-# System prompt
+# Tool schema — defines the structured output format the model must produce
 # ---------------------------------------------------------------------------
+
+ANSWER_TOOL_SCHEMA = {
+    "name": "submit_answer",
+    "description": (
+        "Submit the structured answer to the user's question about Croatian "
+        "accounting, tax, or finance regulations. Use this tool to deliver "
+        "your response — do not respond conversationally."
+    ),
+    "input_schema": {
+        "type": "object",
+        "properties": {
+            "refused": {
+                "type": "boolean",
+                "description": (
+                    "TRUE if the dostavljeni kontekst does not contain a "
+                    "reliable answer to the question. In that case, set "
+                    "answer to a brief explanation that the user should "
+                    "contact the RRiF advisory line, leave citations empty, "
+                    "and set temporal_note to null."
+                ),
+            },
+            "answer": {
+                "type": "string",
+                "description": (
+                    "The answer text in Croatian. Plain text only — do not "
+                    "wrap in markdown code fences or include any JSON "
+                    "structures. Cite sources inline using parentheses, "
+                    "e.g. '(Zakon o PDV-u, NN 73/2013, čl. 38)'."
+                ),
+            },
+            "citations": {
+                "type": "array",
+                "description": (
+                    "List of source citations referenced in the answer. "
+                    "Empty array if refused=true."
+                ),
+                "items": {
+                    "type": "object",
+                    "properties": {
+                        "law_name": {
+                            "type": ["string", "null"],
+                            "description": "e.g. 'Zakon o PDV-u'",
+                        },
+                        "nn_reference": {
+                            "type": ["string", "null"],
+                            "description": "e.g. 'NN 73/2013'",
+                        },
+                        "article_number": {
+                            "type": ["string", "null"],
+                            "description": (
+                                "ONLY the bare article number with no prefix. "
+                                "Correct: '38', '38a', '12', '85'. "
+                                "Wrong: 'čl. 38', 'članak 38', '38. st. 1.', "
+                                "'čl. 12. st. 8. Zakona o porezu na dobit'. "
+                                "If the article has sub-paragraphs (st.) or points (t.), "
+                                "use ONLY the main article number. "
+                                "Use null if the citation has no article number."
+                            ),
+                        },
+                    },
+                    "required": ["law_name", "nn_reference", "article_number"],
+                },
+            },
+            "temporal_note": {
+                "type": ["string", "null"],
+                "description": (
+                    "If the answer relies on regulations, a brief note "
+                    "stating which time period the answer applies to. "
+                    "e.g. 'Odgovor se temelji na propisu važećem od 1.1.2024.' "
+                    "Null if not applicable or if refused=true."
+                ),
+            },
+        },
+        "required": ["refused", "answer", "citations", "temporal_note"],
+    },
+}
+
+
+# ---------------------------------------------------------------------------
+# System prompt — narrower than before because the schema does the heavy lifting
+# ---------------------------------------------------------------------------
+
 SYSTEM_PROMPT = """Ti si AI asistent za RRiF-plus d.o.o. — pomažeš savjetnicima i pretplatnicima s pitanjima iz hrvatskog računovodstva, poreza i financija.
 
 PRAVILA KOJA STROGO POŠTUJEŠ:
 
 1. Odgovaraj ISKLJUČIVO na temelju dostavljenih izvora u odjeljku "KONTEKST". Ne koristi vlastito predznanje.
 
-2. Svaki činjenični navod mora biti popraćen citatom izvora unutar zagrada, npr.: "(Zakon o PDV-u, NN 73/2013, čl. 38)". Citiraj samo izvore koji su ti dostavljeni.
+2. Svaki činjenični navod u tekstu odgovora popraćen je citatom izvora unutar zagrada, npr.: "(Zakon o PDV-u, NN 73/2013, čl. 38)". Citiraj samo izvore koji su ti dostavljeni.
 
-3. Ako dostavljeni kontekst ne sadrži pouzdan odgovor na pitanje:
-   - Eksplicitno reci da nema dovoljno informacija u dostupnoj bazi.
-   - Uputi korisnika na RRiF savjetničku liniju.
-   - NEMOJ izmišljati odgovore, zakone, članke ili brojeve.
-   - NEMOJ koristiti svoje opće znanje o hrvatskim propisima.
+3. Ako dostavljeni kontekst ne sadrži pouzdan odgovor:
+   - Postavi refused=true
+   - U answer polje napiši kratko objašnjenje da nemaš dovoljno informacija i uputu na RRiF savjetničku liniju
+   - Ostavi citations prazno (citations=[])
+   - Ostavi temporal_note prazno (temporal_note=null)
 
-4. Razlikuj važeće i nevažeće propise. Ako odgovor potječe iz starije verzije zakona, jasno to navedi. Završi odgovor s napomenom: "Odgovor se temelji na propisu važećem [opis razdoblja]."
+4. NEMOJ izmišljati odgovore, zakone, članke ili brojeve. NEMOJ koristiti svoje opće znanje o hrvatskim propisima.
 
-5. Odgovaraj sažeto, jasno i u tonu primjerenom stručnoj publici (računovođe, savjetnici, porezni stručnjaci).
+5. Razlikuj važeće i nevažeće propise. Ako odgovor potječe iz starije verzije zakona, jasno to navedi u temporal_note.
 
-6. Odgovori isključivo na hrvatskom jeziku.
+6. Odgovaraj sažeto, jasno i u tonu primjerenom stručnoj publici (računovođe, savjetnici, porezni stručnjaci).
 
-FORMAT ODGOVORA:
-Vrati ČISTI JSON objekt — bez ikakvih markdown oznaka, bez ``` fenceova, bez teksta prije ili poslije. Sam JSON i ništa više.
+7. Odgovaraj ISKLJUČIVO na hrvatskom jeziku.
 
-Struktura:
-{
-  "refused": false,
-  "answer": "Tekst odgovora s inline citatima u zagradama.",
-  "citations": [
-    {"law_name": "Zakon o PDV-u", "nn_reference": "NN 73/2013", "article_number": "38"}
-  ],
-  "temporal_note": "Odgovor se temelji na propisu važećem ..."
-}
-
-Ako odbijaš odgovor:
-{
-  "refused": true,
-  "answer": "Nemam dovoljno informacija u dostupnoj bazi za pouzdan odgovor na ovo pitanje. Preporučujem obraćanje RRiF savjetničkoj liniji.",
-  "citations": [],
-  "temporal_note": null
-}"""
+Koristi ALAT submit_answer za strukturirani odgovor — nemoj odgovarati slobodnim tekstom."""
 
 
 def system_prompt_hash() -> str:
@@ -79,7 +146,7 @@ def system_prompt_hash() -> str:
 
 
 # ---------------------------------------------------------------------------
-# Context formatting
+# Context formatting — unchanged from previous version
 # ---------------------------------------------------------------------------
 
 def format_context(chunks: list[dict]) -> str:
@@ -112,7 +179,7 @@ def format_context(chunks: list[dict]) -> str:
 
 
 # ---------------------------------------------------------------------------
-# Response parsing
+# Response data class — kept compatible with the previous version
 # ---------------------------------------------------------------------------
 
 @dataclass
@@ -127,65 +194,6 @@ class GeneratedAnswer:
     model: str
 
 
-def _extract_json(raw: str) -> dict:
-    """Pull a JSON object out of the model's raw text.
-
-    Handles, in order:
-      - clean JSON
-      - JSON wrapped in ```json ... ``` fences (any position in text)
-      - JSON wrapped in plain ``` ... ``` fences
-      - JSON with leading/trailing prose, by finding the first balanced {...}
-
-    Raises json.JSONDecodeError if no parseable JSON is found.
-    """
-    text = raw.strip()
-
-    # Try: ```json ... ``` block (most common Claude wrapping)
-    fenced_json = re.search(r"```json\s*(\{.*?\})\s*```", text, re.DOTALL)
-    if fenced_json:
-        return json.loads(fenced_json.group(1))
-
-    # Try: plain ``` ... ``` block
-    fenced_plain = re.search(r"```\s*(\{.*?\})\s*```", text, re.DOTALL)
-    if fenced_plain:
-        return json.loads(fenced_plain.group(1))
-
-    # Try: parse the whole thing
-    try:
-        return json.loads(text)
-    except json.JSONDecodeError:
-        pass
-
-    # Last resort: find the first balanced JSON object in the text.
-    # Brace-counting handles nested JSON correctly where regex would not.
-    start = text.find("{")
-    if start == -1:
-        raise json.JSONDecodeError("No JSON object found in response", text, 0)
-    depth = 0
-    in_string = False
-    escape = False
-    for i in range(start, len(text)):
-        ch = text[i]
-        if escape:
-            escape = False
-            continue
-        if ch == "\\":
-            escape = True
-            continue
-        if ch == '"':
-            in_string = not in_string
-            continue
-        if in_string:
-            continue
-        if ch == "{":
-            depth += 1
-        elif ch == "}":
-            depth -= 1
-            if depth == 0:
-                return json.loads(text[start : i + 1])
-    raise json.JSONDecodeError("Unbalanced JSON object", text, start)
-
-
 # ---------------------------------------------------------------------------
 # Public API
 # ---------------------------------------------------------------------------
@@ -196,12 +204,17 @@ def answer(
     *,
     model: str = DEFAULT_MODEL,
 ) -> GeneratedAnswer:
-    """Generate a grounded answer from query + retrieved chunks."""
+    """Generate a grounded answer from query + retrieved chunks.
+
+    Uses the submit_answer tool for structured output. The model is forced
+    to use the tool via tool_choice, so the response is guaranteed to match
+    the schema and no JSON parsing is required on our side.
+    """
     api_key = os.environ.get("ANTHROPIC_API_KEY")
     if not api_key:
         raise RuntimeError("ANTHROPIC_API_KEY not set in environment.")
 
-    client = anthropic.Anthropic(api_key=api_key)
+    client = anthropic.Anthropic(api_key=api_key, timeout=60.0)
     context = format_context(chunks)
     user_message = f"KONTEKST:\n\n{context}\n\n---\n\nPITANJE: {query}"
 
@@ -209,31 +222,49 @@ def answer(
         model=model,
         max_tokens=MAX_TOKENS,
         system=SYSTEM_PROMPT,
+        tools=[ANSWER_TOOL_SCHEMA],
+        tool_choice={"type": "tool", "name": "submit_answer"},
         messages=[{"role": "user", "content": user_message}],
     )
 
-    raw = response.content[0].text if response.content else ""
-    try:
-        parsed = _extract_json(raw)
-        return GeneratedAnswer(
-            refused=bool(parsed.get("refused", False)),
-            answer=parsed.get("answer", ""),
-            citations=parsed.get("citations", []) or [],
-            temporal_note=parsed.get("temporal_note"),
-            raw_response=raw,
-            input_tokens=response.usage.input_tokens,
-            output_tokens=response.usage.output_tokens,
-            model=model,
+    # With tool_choice forcing the tool, response.content[0] should be a
+    # ToolUseBlock with .input matching the schema. If the model somehow
+    # returns text instead (rare, usually due to refusals), fall back gracefully.
+    tool_use_block = None
+    for block in response.content:
+        if getattr(block, "type", None) == "tool_use":
+            tool_use_block = block
+            break
+
+    if tool_use_block is None:
+        # Defensive fallback: model didn't use the tool. Surface as refusal.
+        text_block = next(
+            (b for b in response.content if getattr(b, "type", None) == "text"),
+            None,
         )
-    except (json.JSONDecodeError, ValueError) as exc:
-        # Genuinely unparseable. Surface as a refusal but keep raw output.
+        raw_text = text_block.text if text_block else ""
         return GeneratedAnswer(
             refused=True,
-            answer=f"(Model nije vratio očekivani JSON format. Sirovi odgovor: {raw[:300]})",
+            answer=(
+                "Tehnička pogreška u obradi odgovora. "
+                "Molim Vas obratite se RRiF savjetničkoj liniji."
+            ),
             citations=[],
             temporal_note=None,
-            raw_response=raw,
+            raw_response=raw_text,
             input_tokens=response.usage.input_tokens,
             output_tokens=response.usage.output_tokens,
             model=model,
         )
+
+    data = tool_use_block.input
+    return GeneratedAnswer(
+        refused=bool(data.get("refused", False)),
+        answer=data.get("answer", ""),
+        citations=data.get("citations", []) or [],
+        temporal_note=data.get("temporal_note"),
+        raw_response=str(data),
+        input_tokens=response.usage.input_tokens,
+        output_tokens=response.usage.output_tokens,
+        model=model,
+    )

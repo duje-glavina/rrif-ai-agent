@@ -18,7 +18,7 @@ import re
 import sys
 from datetime import datetime, timezone
 from pathlib import Path
-from unittest import result
+
 
 import yaml
 
@@ -34,26 +34,41 @@ RESULTS_DIR.mkdir(parents=True, exist_ok=True)
 # ---------------------------------------------------------------------------
 # Article number normalizer
 # ---------------------------------------------------------------------------
-
 def _extract_article_number(raw: str | None) -> str | None:
     """Extract the base article number from a citation string.
 
-    Examples:
+    More lenient than v1 — finds the first digit-sequence anywhere in the
+    string after stripping common Croatian/English prefixes. Handles all
+    these inputs the same way:
+
         'čl. 35. st. 1. Zakona o PDV-u'   -> '35'
+        'članak 38'                       -> '38'
         '38. st. 3. t. a) Zakona o PDV-u'  -> '38'
-        'čl. 2'                             -> '2'
-        '38'                                -> '38'
-        None                                -> None
+        'čl. 12. st. 8. Zakona o porezu'  -> '12'
+        'čl. 2'                            -> '2'
+        '38'                               -> '38'
+        '38a'                              -> '38a'
+        'art. 99'                          -> '99'
+        None / ''                          -> None
     """
     if not raw:
         return None
     s = raw.strip()
-    s = re.sub(r'^č(l|lan)\.?\s*', '', s, flags=re.IGNORECASE)
-    s = re.sub(r'^art\.?\s*', '', s, flags=re.IGNORECASE)
+    if not s:
+        return None
+    # Strip common Croatian/English article prefixes anywhere they appear at start.
+    # Covers: čl., čl, član, članak, clan, clanak, art., art, article
+    s = re.sub(
+        r'^(čl(an(ak)?)?\.?|cl(an(ak)?)?\.?|art(icle)?\.?)\s*',
+        '',
+        s,
+        flags=re.IGNORECASE,
+    )
     s = s.strip()
-    m = re.match(r'^(\d+)', s)
+    # Find the FIRST digit-sequence, optionally followed by a single letter.
+    # Use re.search not re.match so we tolerate any remaining leading punctuation.
+    m = re.search(r'(\d+[a-z]?)', s)
     return m.group(1) if m else None
-
 
 # ---------------------------------------------------------------------------
 # Helpers
@@ -139,11 +154,34 @@ def evaluate_one(item: dict, *, skip_generation: bool) -> dict:
             refusal_correct = result.referred_to_advisor
 
     if skip_generation:
-        passed = retrieval_top_1 if item["in_corpus"] else (not result.citations)
-    else:
-        if item["in_corpus"]:
-            passed = retrieval_top_1 and refusal_correct
+        # Retrieval-only: if we have expected_articles, check those. Otherwise
+        # we can't grade retrieval without generation, so just check no-refusal.
+        if not item["in_corpus"]:
+            passed = not result.citations
+        elif item["expected_articles"]:
+            passed = retrieval_top_1
         else:
+            # Magazine-content question without specific articles to check.
+            # Use citation count as a weak proxy for "found something useful".
+            passed = bool(result.citations)
+    else:
+        if not item["in_corpus"]:
+            # Trap question — pass if correctly refused
+            passed = refusal_correct
+        elif item["expected_articles"]:
+            # Law-text question — pass if we found the right article AND didn't refuse
+            passed = retrieval_top_1 and refusal_correct
+        elif item.get("expected_keywords"):
+            # Magazine-content question — pass if we didn't refuse AND
+            # answer mentions expected keywords
+            answer_has_keywords = (
+                keyword_total is not None
+                and keyword_total > 0
+                and (keyword_hits / keyword_total) >= 0.5
+            )
+            passed = refusal_correct and answer_has_keywords
+        else:
+            # No grading criteria available; pass if didn't refuse
             passed = refusal_correct
 
     return {

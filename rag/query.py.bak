@@ -34,8 +34,7 @@ from pgvector.psycopg import register_vector
 from rag.classifier import ClassifierResult, classify
 from rag.embedder import embed_query
 from rag.retrieve.rerank import rerank
-from rag.generate.answerer import answer as _generate_answer
-
+from rag.generate.answerer import _extract_json
 
 
 load_dotenv()
@@ -64,6 +63,37 @@ PRAVILA KOJA MORAŠ STROGO POŠTOVATI:
 7. Odgovaraj na hrvatskom jeziku.
 8. Vraćaj odgovor kao JSON objekt s poljima: answer, citations, temporal_basis,
    confidence, referred_to_advisor.
+"""
+
+RESPONSE_SCHEMA = """\
+Vrati ISKLJUČIVO JSON bez ikakvog teksta prije ili nakon, u ovom obliku:
+{
+  "answer": "<tvoj odgovor na hrvatskom>",
+  "citations": [
+    {
+      "source": "<citation string iz konteksta>",
+      "article_number": "<broj članka ili null>",
+      "valid_from": "<YYYY-MM-DD ili null>",
+      "valid_to": "<YYYY-MM-DD ili null>",
+      "excerpt": "<kratki relevantni izvadak, max 200 znakova>"
+    }
+  ],
+  "temporal_basis": "<rečenica koja objašnjava na koji datum se odnosi odgovor>",
+  "confidence": "high",
+  "referred_to_advisor": false
+}
+
+KRITIČNO o formatu polja "answer":
+- Polje "answer" mora sadržavati SAMO čisti tekst odgovora kao string vrijednost.
+- NE koristi ```json oznake ili bilo kakve markdown code fence (```) unutar "answer" polja.
+- NE umetaj dodatni JSON objekt unutar "answer" polja.
+- Tekst odgovora ide direktno kao string vrijednost JSON polja.
+
+Ako ne možeš odgovoriti iz dostavljenog konteksta:
+- answer: objasni da nemaš pouzdani odgovor i uputi na RRiF savjetničku liniju
+- citations: []
+- confidence: "low"
+- referred_to_advisor: true
 """
 
 
@@ -221,70 +251,105 @@ def _retrieve(question: str, clf: ClassifierResult) -> list[tuple]:
 
 # ── Generation ────────────────────────────────────────────────────────────────
 
+def _build_context(chunks: list[tuple]) -> str:
+    """Format retrieved chunks as a readable context block for the LLM."""
+    parts = []
+    for i, (cid, text, source, article_no, valid_from, valid_to) in enumerate(chunks):
+        status = "VAŽEĆE" if valid_to is None else f"NEVAŽEĆE (do {valid_to})"
+        art = f", čl. {article_no}" if article_no else ""
+        header = f"[{i+1}] {status} | {source}{art}"
+        if valid_from:
+            header += f" | od {valid_from}"
+        parts.append(f"{header}\n{text}")
+    return "\n\n---\n\n".join(parts)
 
 
-def _generate(question: str, top_chunks: list[tuple], clf: ClassifierResult) -> QueryResponse:
-    """Generate a structured answer via answerer.answer() (tool-use API).
-
-    `top_chunks` is the list of retrieved chunks (already reranked) — same
-    shape that _retrieve() returns. We translate it to the dict shape that
-    answerer.answer() expects.
-    """
+def _generate(question: str, context: str, clf: ClassifierResult) -> tuple[QueryResponse, int, int]:
+    """Call Claude Sonnet to generate the answer. Returns (response, tokens_in, tokens_out)."""
     import time
-    from datetime import date as _date
 
-    # Translate retrieval rows into the chunk-dict shape answerer expects.
-    # Retrieval row layout: (chunk_id, chunk_text, source, article_number,
-    #                        valid_from, valid_to)
-    chunks_for_answerer: list[dict] = []
-    for row in top_chunks:
-        # Defensive — row may have varying length depending on retrieval path
-        chunk_id = row[0] if len(row) > 0 else None
-        chunk_text = row[1] if len(row) > 1 else ""
-        source = row[2] if len(row) > 2 else ""
-        article_number = row[3] if len(row) > 3 else None
-        valid_from = row[4] if len(row) > 4 else None
-        valid_to = row[5] if len(row) > 5 else None
-        chunks_for_answerer.append({
-            "chunk_id": chunk_id,
-            "chunk_text": chunk_text,
-            "source": source,
-            "law_name": None,  # not in retrieval row tuple — could be added later
-            "nn_reference": None,
-            "article_number": article_number,
-            "valid_from": valid_from,
-            "valid_to": valid_to,
-            "status": "vazeci" if not valid_to else "nevazeci",
-        })
+    client = anthropic.Anthropic(
+    api_key=os.environ["ANTHROPIC_API_KEY"],
+    timeout=60.0,  # one minute is plenty for 1500-token generation
+)
+
+    today = date.today().isoformat()
+    user_message = dedent(f"""\
+        Kontekst iz baze znanja (preuzeto {today}):
+
+        {context}
+
+        ---
+
+        Pitanje: {question}
+
+        {RESPONSE_SCHEMA}
+    """)
 
     t0 = time.perf_counter()
-    gen = _generate_answer(question, chunks_for_answerer, model=GENERATOR_MODEL)
+    response = client.messages.create(
+        model=GENERATOR_MODEL,
+        max_tokens=2500,
+        system=SYSTEM_PROMPT,
+        messages=[{"role": "user", "content": user_message}],
+    )
     latency_ms = int((time.perf_counter() - t0) * 1000)
 
-    # Translate citations from answerer's format to QueryResponse's Citation shape.
+    raw_text = response.content[0].text.strip()
+    tokens_in = response.usage.input_tokens
+    tokens_out = response.usage.output_tokens
+    
+    # Detect truncation. If the model hit max_tokens, the JSON is likely
+    # incomplete and parsing will fail. Log so we can debug.
+    if response.stop_reason == "max_tokens":
+        log.warning(
+            "Response hit max_tokens limit (output=%d). Answer may be truncated.",
+            tokens_out,
+        )
+
+    # Use the robust parser from answerer.py (handles fences, prose preambles,
+    # and balanced-brace extraction). If even that fails, the response is
+    # genuinely malformed — preserve the text as the answer rather than
+    # marking it as a refusal.
+
+    try:
+        data = _extract_json(raw_text)
+    except (json.JSONDecodeError, ValueError):
+        log.warning("Generator returned unparseable JSON, preserving raw text as answer")
+        data = {
+            "answer": raw_text,
+            "citations": [],
+            "temporal_basis": f"Odgovor generiran {today}.",
+            "confidence": "low",
+            # Do NOT set referred_to_advisor=True here — the answer text
+            # may still be substantive. Only the structuring failed.
+            "referred_to_advisor": False,
+        }
     citations = [
         Citation(
-            source=c.get("law_name") or "",
+            source=c.get("source", ""),
             article_number=c.get("article_number"),
-            valid_from=None,  # answerer doesn't currently return per-citation validity
-            valid_to=None,
-            excerpt="",
+            valid_from=c.get("valid_from"),
+            valid_to=c.get("valid_to"),
+            excerpt=c.get("excerpt", "")[:200],
         )
-        for c in gen.citations
+        for c in data.get("citations", [])
     ]
 
-    today = _date.today().isoformat()
-    return QueryResponse(
-        answer=gen.answer,
+    qr = QueryResponse(
+        answer=data.get("answer", ""),
         citations=citations,
-        temporal_basis=gen.temporal_note or f"Odgovor generiran {today}.",
-        confidence="low" if gen.refused else "high",
-        referred_to_advisor=gen.refused,
+        temporal_basis=data.get("temporal_basis", ""),
+        confidence=data.get("confidence", "low"),
+        referred_to_advisor=data.get("referred_to_advisor", False),
         classifier=clf,
         latency_ms=latency_ms,
-        tokens_in=gen.input_tokens,
-        tokens_out=gen.output_tokens,
+        tokens_in=tokens_in,
+        tokens_out=tokens_out,
     )
+    return qr
+
+
 # ── Public API ────────────────────────────────────────────────────────────────
 
 def ask(question: str, verbose: bool = False) -> QueryResponse:
@@ -343,8 +408,8 @@ def ask(question: str, verbose: bool = False) -> QueryResponse:
             top_chunks.append(row)
 
     # Step 4: Generate
-    result = _generate(question, top_chunks, clf)
-
+    context = _build_context(top_chunks)
+    result = _generate(question, context, clf)
 
     result.latency_ms = int((time.perf_counter() - t_start) * 1000)
 

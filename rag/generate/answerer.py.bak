@@ -1,0 +1,280 @@
+"""Claude generation: produce a grounded, cited answer from retrieved chunks.
+
+The system prompt enforces:
+  - Answer only from provided context
+  - Cite sources inline (Zakon o ..., NN, čl.)
+  - Refuse and redirect to RRiF advisor line when uncertain
+  - Disclose temporal basis when laws are involved
+  - Croatian language only
+
+Output is structured: the model responds with JSON (answer + citations + refusal flag),
+which we parse and return. JSON output makes downstream evaluation cleaner than parsing
+free-form text.
+"""
+from __future__ import annotations
+
+import hashlib
+import json
+import os
+import re
+from dataclasses import dataclass
+
+import anthropic
+from dotenv import load_dotenv
+
+load_dotenv()
+
+
+DEFAULT_MODEL = os.environ.get("CLAUDE_MODEL", "claude-sonnet-4-6")
+MAX_TOKENS = 1500
+
+
+# ---------------------------------------------------------------------------
+# System prompt
+# ---------------------------------------------------------------------------
+SYSTEM_PROMPT = """Ti si AI asistent za RRiF-plus d.o.o. — pomažeš savjetnicima i pretplatnicima s pitanjima iz hrvatskog računovodstva, poreza i financija.
+
+PRAVILA KOJA STROGO POŠTUJEŠ:
+
+1. Odgovaraj ISKLJUČIVO na temelju dostavljenih izvora u odjeljku "KONTEKST". Ne koristi vlastito predznanje.
+
+2. Svaki činjenični navod mora biti popraćen citatom izvora unutar zagrada, npr.: "(Zakon o PDV-u, NN 73/2013, čl. 38)". Citiraj samo izvore koji su ti dostavljeni.
+
+3. Ako dostavljeni kontekst ne sadrži pouzdan odgovor na pitanje:
+   - Eksplicitno reci da nema dovoljno informacija u dostupnoj bazi.
+   - Uputi korisnika na RRiF savjetničku liniju.
+   - NEMOJ izmišljati odgovore, zakone, članke ili brojeve.
+   - NEMOJ koristiti svoje opće znanje o hrvatskim propisima.
+
+4. Razlikuj važeće i nevažeće propise. Ako odgovor potječe iz starije verzije zakona, jasno to navedi. Završi odgovor s napomenom: "Odgovor se temelji na propisu važećem [opis razdoblja]."
+
+5. Odgovaraj sažeto, jasno i u tonu primjerenom stručnoj publici (računovođe, savjetnici, porezni stručnjaci).
+
+6. Odgovori isključivo na hrvatskom jeziku.
+
+FORMAT ODGOVORA:
+Vrati ČISTI JSON objekt — bez ikakvih markdown oznaka, bez ``` fenceova, bez teksta prije ili poslije. Sam JSON i ništa više.
+
+Struktura:
+{
+  "refused": false,
+  "answer": "Tekst odgovora s inline citatima u zagradama.",
+  "citations": [
+    {"law_name": "Zakon o PDV-u", "nn_reference": "NN 73/2013", "article_number": "38"}
+  ],
+  "temporal_note": "Odgovor se temelji na propisu važećem ..."
+}
+
+Ako odbijaš odgovor:
+{
+  "refused": true,
+  "answer": "Nemam dovoljno informacija u dostupnoj bazi za pouzdan odgovor na ovo pitanje. Preporučujem obraćanje RRiF savjetničkoj liniji.",
+  "citations": [],
+  "temporal_note": null
+}"""
+
+
+def system_prompt_hash() -> str:
+    return hashlib.sha256(SYSTEM_PROMPT.encode("utf-8")).hexdigest()[:12]
+
+
+# ---------------------------------------------------------------------------
+# Context formatting
+# ---------------------------------------------------------------------------
+
+def format_context(chunks: list[dict]) -> str:
+    if not chunks:
+        return "(Nema rezultata pretrage. Baza znanja ne sadrži relevantne dokumente za ovo pitanje.)"
+
+    blocks: list[str] = []
+    for i, c in enumerate(chunks, start=1):
+        meta_lines = [f"[Izvor {i}]"]
+        if c.get("law_name"):
+            meta_lines.append(f"Zakon: {c['law_name']}")
+        if c.get("nn_reference"):
+            meta_lines.append(f"Narodne novine: {c['nn_reference']}")
+        if c.get("article_number"):
+            meta_lines.append(f"Članak: {c['article_number']}")
+        validity = []
+        if c.get("valid_from"):
+            validity.append(f"od {c['valid_from']}")
+        if c.get("valid_to"):
+            validity.append(f"do {c['valid_to']}")
+        else:
+            validity.append("trenutno na snazi")
+        meta_lines.append(f"Razdoblje važenja: {', '.join(validity)}")
+        meta_lines.append(f"Status: {c.get('status', 'nepoznato')}")
+        meta_lines.append("Tekst:")
+        meta_lines.append(c["chunk_text"])
+        blocks.append("\n".join(meta_lines))
+
+    return "\n\n---\n\n".join(blocks)
+
+
+# ---------------------------------------------------------------------------
+# Response parsing
+# ---------------------------------------------------------------------------
+
+@dataclass
+class GeneratedAnswer:
+    refused: bool
+    answer: str
+    citations: list[dict]
+    temporal_note: str | None
+    raw_response: str
+    input_tokens: int
+    output_tokens: int
+    model: str
+
+
+def _extract_json(raw: str) -> dict:
+    """Pull a JSON object out of the model's raw text.
+
+    Handles, in order:
+      - clean JSON
+      - JSON wrapped in ```json ... ``` fences (closing fence optional)
+      - JSON wrapped in plain ``` ... ``` fences (closing fence optional)
+      - JSON with leading/trailing prose, by finding the first balanced {...}
+      - Double-wrapping: when the model puts another ```json...``` block
+        inside the "answer" field as a string. Detected and unwrapped once.
+
+    Raises json.JSONDecodeError if no parseable JSON is found.
+    """
+    data = _parse_json_text(raw)
+
+    # Detect double-wrapping: the model sometimes puts its full structured
+    # response inside the "answer" field as a code-fenced string. Unwrap once.
+    if isinstance(data, dict) and isinstance(data.get("answer"), str):
+        inner_text = data["answer"].strip()
+        if inner_text.startswith("```json") or inner_text.startswith("```"):
+            try:
+                inner_data = _parse_json_text(inner_text)
+                # Only replace if inner has the expected structured shape
+                if isinstance(inner_data, dict) and "answer" in inner_data:
+                    return inner_data
+            except (json.JSONDecodeError, ValueError):
+                pass  # Inner unwrap failed; keep outer as-is
+
+    return data
+
+
+def _parse_json_text(raw: str) -> dict:
+    """Internal: try multiple strategies to parse a JSON object from text.
+
+    Pulled out of _extract_json so we can call it recursively for unwrapping.
+    """
+    text = raw.strip()
+
+    # Strip leading code fence even if no closing fence present.
+    # Models sometimes start with ```json\n and forget the trailing ```,
+    # especially when the response runs long or hits max_tokens.
+    if text.startswith("```json"):
+        text = text[len("```json"):].lstrip("\n").strip()
+    elif text.startswith("```"):
+        text = text[len("```"):].lstrip("\n").strip()
+
+    # Strip trailing fence if present
+    if text.endswith("```"):
+        text = text[:-3].rstrip()
+
+    # Try: parse the whole thing now that fences are gone
+    try:
+        return json.loads(text)
+    except json.JSONDecodeError:
+        pass
+
+    # Try: balanced ```json ... ``` block somewhere in the text.
+    fenced_json = re.search(r"```json\s*(\{[\s\S]*\})\s*```", text)
+    if fenced_json:
+        try:
+            return json.loads(fenced_json.group(1))
+        except json.JSONDecodeError:
+            pass
+
+    fenced_plain = re.search(r"```\s*(\{[\s\S]*\})\s*```", text)
+    if fenced_plain:
+        try:
+            return json.loads(fenced_plain.group(1))
+        except json.JSONDecodeError:
+            pass
+
+    # Last resort: find a balanced JSON object via brace-counting.
+    # Properly tracks string literals so escaped quotes don't trip the counter.
+    start = text.find("{")
+    if start == -1:
+        raise json.JSONDecodeError("No JSON object found in response", text, 0)
+    depth = 0
+    in_string = False
+    escape = False
+    for i in range(start, len(text)):
+        ch = text[i]
+        if escape:
+            escape = False
+            continue
+        if ch == "\\":
+            escape = True
+            continue
+        if ch == '"':
+            in_string = not in_string
+            continue
+        if in_string:
+            continue
+        if ch == "{":
+            depth += 1
+        elif ch == "}":
+            depth -= 1
+            if depth == 0:
+                return json.loads(text[start : i + 1])
+    raise json.JSONDecodeError("Unbalanced JSON object", text, start)
+
+# ---------------------------------------------------------------------------
+# Public API
+# ---------------------------------------------------------------------------
+
+def answer(
+    query: str,
+    chunks: list[dict],
+    *,
+    model: str = DEFAULT_MODEL,
+) -> GeneratedAnswer:
+    """Generate a grounded answer from query + retrieved chunks."""
+    api_key = os.environ.get("ANTHROPIC_API_KEY")
+    if not api_key:
+        raise RuntimeError("ANTHROPIC_API_KEY not set in environment.")
+
+    client = anthropic.Anthropic(api_key=api_key)
+    context = format_context(chunks)
+    user_message = f"KONTEKST:\n\n{context}\n\n---\n\nPITANJE: {query}"
+
+    response = client.messages.create(
+        model=model,
+        max_tokens=MAX_TOKENS,
+        system=SYSTEM_PROMPT,
+        messages=[{"role": "user", "content": user_message}],
+    )
+
+    raw = response.content[0].text if response.content else ""
+    try:
+        parsed = _extract_json(raw)
+        return GeneratedAnswer(
+            refused=bool(parsed.get("refused", False)),
+            answer=parsed.get("answer", ""),
+            citations=parsed.get("citations", []) or [],
+            temporal_note=parsed.get("temporal_note"),
+            raw_response=raw,
+            input_tokens=response.usage.input_tokens,
+            output_tokens=response.usage.output_tokens,
+            model=model,
+        )
+    except (json.JSONDecodeError, ValueError) as exc:
+        # Genuinely unparseable. Surface as a refusal but keep raw output.
+        return GeneratedAnswer(
+            refused=True,
+            answer=f"(Model nije vratio očekivani JSON format. Sirovi odgovor: {raw[:300]})",
+            citations=[],
+            temporal_note=None,
+            raw_response=raw,
+            input_tokens=response.usage.input_tokens,
+            output_tokens=response.usage.output_tokens,
+            model=model,
+        )
