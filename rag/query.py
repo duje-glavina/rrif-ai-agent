@@ -1,20 +1,16 @@
 """End-to-end query pipeline for the RRiF AI Agent.
 
 Orchestrates the full RAG flow:
-  1. Classify question (Haiku)         → category, time_period, source_type
-  2. Hybrid retrieval with filters     → top 20 candidates from pgvector + FTS
+  1. Classify question (Haiku)         → domain, subdomains, time_period
+  2. Hybrid retrieval with filters     → top 20 candidates (semantic + FTS, RRF fused)
   3. Cross-encoder reranking (BGE)     → top 5 most relevant chunks
   4. Answer generation (Sonnet)        → answer + citations + temporal basis
-  5. Return structured JSON response
+  5. Return structured QueryResponse
 
-Usage:
-    from rag.query import ask
-    result = ask("Koji je rok za predaju PDV obrasca?")
-    print(result.answer)
-    print(result.citations)
-
-    # Or from CLI:
-    python -m rag.query "Koji je rok za predaju PDV obrasca?"
+Retrieval uses a three-level fallback:
+  tight  → domain + subdomain(s)
+  medium → domain only
+  wide   → no filter (last resort)
 """
 from __future__ import annotations
 
@@ -23,10 +19,8 @@ import logging
 import os
 from dataclasses import dataclass, field
 from datetime import date
-from textwrap import dedent
 from typing import Literal
 
-import anthropic
 import psycopg
 from dotenv import load_dotenv
 from pgvector.psycopg import register_vector
@@ -36,35 +30,17 @@ from rag.embedder import embed_query
 from rag.retrieve.rerank import rerank
 from rag.generate.answerer import answer as _generate_answer
 
-
-
 load_dotenv()
 
 log = logging.getLogger(__name__)
 
 # ── Configuration ─────────────────────────────────────────────────────────────
 
-GENERATOR_MODEL   = "claude-sonnet-4-6"
-CANDIDATES        = 20    # hybrid retrieval pool before reranking
-TOP_K             = 5     # chunks passed to the generator after reranking
-RRF_K             = 60    # reciprocal rank fusion constant (matches hybrid.py)
-
-SYSTEM_PROMPT = """\
-Ti si AI agent koji pomaže savjetnicima i korisnicima RRiF-plus d.o.o.
-s pitanjima iz područja računovodstva, poreza i financija.
-
-PRAVILA KOJA MORAŠ STROGO POŠTOVATI:
-1. Odgovaraj ISKLJUČIVO na temelju dokumenata koji su ti dostavljeni kao kontekst.
-2. Svaki odgovor mora sadržavati navod izvora (naziv dokumenta/zakona, članak, godina).
-3. Ako odgovor nije pronađen u dostavljenim dokumentima, eksplicitno navedi da ne možeš
-   odgovoriti i uputi korisnika na RRiF savjetničku liniju.
-4. NIKADA ne izmišljaj odgovore, zakone, članke ili brojeve koji nisu u kontekstu.
-5. Jasno razlikuj važeće i nevažeće/stare propise ako su oba prisutna u kontekstu.
-6. Na kraju odgovora uvijek navedi vremensku osnovu: na koji datum se odnosi odgovor.
-7. Odgovaraj na hrvatskom jeziku.
-8. Vraćaj odgovor kao JSON objekt s poljima: answer, citations, temporal_basis,
-   confidence, referred_to_advisor.
-"""
+GENERATOR_MODEL         = "claude-sonnet-4-6"
+CANDIDATES              = 20
+TOP_K                   = 5
+RRF_K                   = 60
+MIN_FALLBACK_CANDIDATES = 5   # widen filter if fewer candidates than this
 
 
 # ── Response data classes ─────────────────────────────────────────────────────
@@ -85,14 +61,12 @@ class QueryResponse:
     temporal_basis: str
     confidence: Literal["high", "low"]
     referred_to_advisor: bool
-    # Diagnostics (not shown to end users)
     classifier: ClassifierResult = field(repr=False)
     latency_ms: int = 0
     tokens_in: int = 0
     tokens_out: int = 0
 
     def to_dict(self) -> dict:
-        """Serialise to plain dict for JSON output."""
         return {
             "answer": self.answer,
             "citations": [
@@ -109,7 +83,8 @@ class QueryResponse:
             "confidence": self.confidence,
             "referred_to_advisor": self.referred_to_advisor,
             "meta": {
-                "category": self.classifier.category,
+                "domain": self.classifier.domain,
+                "subdomains": self.classifier.subdomains,
                 "time_period": self.classifier.time_period.type,
                 "latency_ms": self.latency_ms,
                 "tokens_in": self.tokens_in,
@@ -118,42 +93,37 @@ class QueryResponse:
         }
 
 
-# ── Retrieval ─────────────────────────────────────────────────────────────────
+# ── Retrieval helpers ─────────────────────────────────────────────────────────
 
-def _retrieve(question: str, clf: ClassifierResult) -> list[tuple]:
-    """Hybrid retrieval (semantic + FTS) with classifier-driven filters.
+def _build_where(
+    domain: str | None,
+    subdomains: list[str] | None,
+    sql_time: str | None,
+    params: list,
+) -> str:
+    clauses = ["citable = TRUE"]
 
-    Returns list of (chunk_id, chunk_text, source, article_number,
-                      valid_from, valid_to) tuples, up to CANDIDATES rows.
-    """
-    qvec = embed_query(question)
-    filters = clf.to_retrieval_filter()
+    if domain and subdomains:
+        clauses.append("domain = %s AND subdomain = ANY(%s)")
+        params.extend([domain, subdomains])
+    elif domain:
+        clauses.append("domain = %s")
+        params.append(domain)
 
-    # Build dynamic WHERE clauses from classifier output
-    where_clauses = ["citable = TRUE"]
-    params: list = []
-
-    if filters["category"]:
-        where_clauses.append("category = %s")
-        params.append(filters["category"])
-
-    # source_type filtering disabled — category filter is sufficient for now.
-    # Re-enable once psycopg array handling is confirmed working.
-    # if filters["source_types"]:
-    #     where_clauses.append("source_type = ANY(%s)")
-    #     params.append(list(filters["source_types"]))
-
-    sql_time = filters["sql_time_filter"]
     if sql_time:
-        where_clauses.append(f"({sql_time})")
+        clauses.append(f"({sql_time})")
 
-    where_sql = " AND ".join(where_clauses)
+    return " AND ".join(clauses)
 
-    # Use two separate connections: one plain (FTS) and one with pgvector registered.
-    # register_vector() changes the type adapter globally on the connection,
-    # causing psycopg to misinterpret plain text params as vectors.
 
-    # ── Connection 1: FTS (plain text params only) ───────────────────────────
+def _semantic_fts_search(
+    question: str,
+    qvec,
+    where_sql: str,
+    params: list,
+    n: int,
+) -> tuple[dict, dict]:
+    """Run semantic + FTS search. Returns (sem_rows, fts_rows) dicts keyed by chunk id."""
     fts_rows: dict = {}
     words = [w for w in question.split() if len(w) >= 3]
     if words:
@@ -175,13 +145,12 @@ def _retrieve(question: str, clf: ClassifierResult) -> list[tuple]:
                         ) DESC
                         LIMIT %s
                         """,
-                        params + [tsquery, tsquery, CANDIDATES],
+                        params + [tsquery, tsquery, n],
                     )
                     fts_rows = {row[0]: row for row in cur.fetchall()}
         except Exception as e:
             log.warning("FTS search failed: %s", e)
 
-    # ── Connection 2: Semantic search (pgvector registered) ──────────────────
     with psycopg.connect(os.environ["DATABASE_URL"]) as conn_vec:
         register_vector(conn_vec)
         with conn_vec.cursor() as cur:
@@ -194,11 +163,15 @@ def _retrieve(question: str, clf: ClassifierResult) -> list[tuple]:
                 ORDER BY embedding <=> %s
                 LIMIT %s
                 """,
-                params + [qvec, CANDIDATES],
+                params + [qvec, n],
             )
             sem_rows = {row[0]: row for row in cur.fetchall()}
 
-    # RRF fusion
+    return sem_rows, fts_rows
+
+
+def _rrf_merge(sem_rows: dict, fts_rows: dict) -> list[tuple]:
+    """Reciprocal Rank Fusion. Returns rows sorted by RRF score."""
     sem_ranks = {rid: i + 1 for i, rid in enumerate(sem_rows)}
     fts_ranks = {rid: i + 1 for i, rid in enumerate(fts_rows)}
     all_ids = set(sem_ranks) | set(fts_ranks)
@@ -211,62 +184,83 @@ def _retrieve(question: str, clf: ClassifierResult) -> list[tuple]:
         if rid in fts_ranks:
             score += 1.0 / (RRF_K + fts_ranks[rid])
         row = sem_rows.get(rid) or fts_rows.get(rid)
-        # (id, text, source, article_number, valid_from, valid_to)
         scored.append((score, row[0], row[1], row[2], row[3], row[4], row[5]))
 
     scored.sort(reverse=True)
-    # Return (chunk_id, text, source, article_number, valid_from, valid_to)
     return [(r[1], r[2], r[3], r[4], r[5], r[6]) for r in scored[:CANDIDATES]]
+
+
+def _retrieve(question: str, clf: ClassifierResult) -> list[tuple]:
+    """Hybrid retrieval with three-level fallback.
+
+    1. tight  — domain + subdomains
+    2. medium — domain only        (if tight < MIN_FALLBACK_CANDIDATES)
+    3. wide   — no filter          (if medium < MIN_FALLBACK_CANDIDATES)
+    """
+    qvec = embed_query(question)
+    filters = clf.to_retrieval_filter()
+    sql_time = filters["sql_time_filter"]
+
+    # Attempt 1: tight
+    params: list = []
+    where_sql = _build_where(filters["domain"], filters["subdomains"], sql_time, params)
+    sem_rows, fts_rows = _semantic_fts_search(question, qvec, where_sql, params, CANDIDATES)
+    candidates = _rrf_merge(sem_rows, fts_rows)
+
+    if len(candidates) >= MIN_FALLBACK_CANDIDATES:
+        log.debug("_retrieve tight: %d (domain=%s subdomains=%s)",
+                  len(candidates), filters["domain"], filters["subdomains"])
+        return candidates
+
+    # Attempt 2: domain-only
+    log.info("_retrieve → domain-only fallback (tight=%d, domain=%s)",
+             len(candidates), filters["domain"])
+    fb = clf.fallback_filter()
+    params2: list = []
+    where_sql2 = _build_where(fb["domain"], None, sql_time, params2)
+    sem2, fts2 = _semantic_fts_search(question, qvec, where_sql2, params2, CANDIDATES)
+    candidates2 = _rrf_merge(sem2, fts2)
+
+    if len(candidates2) >= MIN_FALLBACK_CANDIDATES:
+        return candidates2
+
+    # Attempt 3: unfiltered
+    log.info("_retrieve → unfiltered fallback (domain-level=%d)", len(candidates2))
+    params3: list = []
+    where_sql3 = _build_where(None, None, sql_time, params3)
+    sem3, fts3 = _semantic_fts_search(question, qvec, where_sql3, params3, CANDIDATES)
+    return _rrf_merge(sem3, fts3)
 
 
 # ── Generation ────────────────────────────────────────────────────────────────
 
-
-
 def _generate(question: str, top_chunks: list[tuple], clf: ClassifierResult) -> QueryResponse:
-    """Generate a structured answer via answerer.answer() (tool-use API).
-
-    `top_chunks` is the list of retrieved chunks (already reranked) — same
-    shape that _retrieve() returns. We translate it to the dict shape that
-    answerer.answer() expects.
-    """
     import time
     from datetime import date as _date
 
-    # Translate retrieval rows into the chunk-dict shape answerer expects.
-    # Retrieval row layout: (chunk_id, chunk_text, source, article_number,
-    #                        valid_from, valid_to)
     chunks_for_answerer: list[dict] = []
     for row in top_chunks:
-        # Defensive — row may have varying length depending on retrieval path
-        chunk_id = row[0] if len(row) > 0 else None
-        chunk_text = row[1] if len(row) > 1 else ""
-        source = row[2] if len(row) > 2 else ""
-        article_number = row[3] if len(row) > 3 else None
-        valid_from = row[4] if len(row) > 4 else None
-        valid_to = row[5] if len(row) > 5 else None
         chunks_for_answerer.append({
-            "chunk_id": chunk_id,
-            "chunk_text": chunk_text,
-            "source": source,
-            "law_name": None,  # not in retrieval row tuple — could be added later
+            "chunk_id":     row[0] if len(row) > 0 else None,
+            "chunk_text":   row[1] if len(row) > 1 else "",
+            "source":       row[2] if len(row) > 2 else "",
+            "law_name":     None,
             "nn_reference": None,
-            "article_number": article_number,
-            "valid_from": valid_from,
-            "valid_to": valid_to,
-            "status": "vazeci" if not valid_to else "nevazeci",
+            "article_number": row[3] if len(row) > 3 else None,
+            "valid_from":   row[4] if len(row) > 4 else None,
+            "valid_to":     row[5] if len(row) > 5 else None,
+            "status":       "vazeci" if not (row[5] if len(row) > 5 else None) else "nevazeci",
         })
 
     t0 = time.perf_counter()
     gen = _generate_answer(question, chunks_for_answerer, model=GENERATOR_MODEL)
     latency_ms = int((time.perf_counter() - t0) * 1000)
 
-    # Translate citations from answerer's format to QueryResponse's Citation shape.
     citations = [
         Citation(
             source=c.get("law_name") or "",
             article_number=c.get("article_number"),
-            valid_from=None,  # answerer doesn't currently return per-citation validity
+            valid_from=None,
             valid_to=None,
             excerpt="",
         )
@@ -285,35 +279,27 @@ def _generate(question: str, top_chunks: list[tuple], clf: ClassifierResult) -> 
         tokens_in=gen.input_tokens,
         tokens_out=gen.output_tokens,
     )
+
+
 # ── Public API ────────────────────────────────────────────────────────────────
 
 def ask(question: str, verbose: bool = False) -> QueryResponse:
-    """Full RAG pipeline: classify → retrieve → rerank → generate.
-
-    Args:
-        question: User's question in Croatian.
-        verbose:  If True, log intermediate steps to stdout.
-
-    Returns:
-        QueryResponse with answer, citations, and diagnostics.
-    """
+    """Full RAG pipeline: classify → retrieve → rerank → generate."""
     import time
     t_start = time.perf_counter()
 
     # Step 1: Classify
     clf = classify(question)
     if verbose:
-        print(f"[classifier] category={clf.category} | "
-              f"time={clf.time_period.type} | "
-              f"src_pref={clf.source_type_preference}")
+        print(f"[classifier] domain={clf.domain} subdomains={clf.subdomains} | "
+              f"time={clf.time_period.type} | recency={clf.recency_boost}")
 
-    # Step 2: Hybrid retrieval
+    # Step 2: Retrieve
     candidates = _retrieve(question, clf)
     if verbose:
         print(f"[retrieval] {len(candidates)} candidates returned")
 
     if not candidates:
-        # Nothing in DB — refuse immediately
         from datetime import date as _date
         return QueryResponse(
             answer=(
@@ -334,18 +320,15 @@ def ask(question: str, verbose: bool = False) -> QueryResponse:
     if verbose:
         print(f"[reranker] top {len(reranked)} chunks selected")
 
-    # Rebuild full rows for context (reranker only returns id + text + score)
     meta_lookup = {row[0]: row for row in candidates}
-    top_chunks = []
-    for chunk_id, text, score in reranked:
-        row = meta_lookup.get(chunk_id)
-        if row:
-            top_chunks.append(row)
+    top_chunks = [
+        meta_lookup[chunk_id]
+        for chunk_id, _, _ in reranked
+        if chunk_id in meta_lookup
+    ]
 
     # Step 4: Generate
     result = _generate(question, top_chunks, clf)
-
-
     result.latency_ms = int((time.perf_counter() - t_start) * 1000)
 
     if verbose:

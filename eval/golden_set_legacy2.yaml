@@ -1,0 +1,291 @@
+# Golden evaluation set for the RRiF AI Agent — v2.
+#
+# v2 changes:
+#   - Expanded from 7 to 28 questions
+#   - Coverage of all 16 DB categories (weighted by chunk volume)
+#   - New field: expected_category   — for classifier-routing accuracy
+#   - New field: expected_keywords    — for answer-content grading on
+#                                       questions where article numbers
+#                                       don't apply (magazine articles)
+#
+# Grading signals (handled by run_eval.py):
+#   expected_articles  : list[str]   article numbers that should appear in
+#                                    top-k retrieval (for law chunks only)
+#   expected_keywords  : list[str]   substrings that should appear in the
+#                                    generated answer (for any chunk type)
+#   expected_category  : str         the category the classifier should
+#                                    output (separate from retrieval grading)
+#   in_corpus          : bool        true if the answer exists in the KB
+#
+# Conventions:
+#   - Use [] for expected_articles when the answer comes from magazine
+#     articles rather than numbered laws.
+#   - expected_keywords is best-effort — keep to 2-4 distinctive terms,
+#     case-insensitive substring match.
+#   - expected_category is the single best-fit category. If the classifier
+#     legitimately could pick two, the prompt itself should be updated
+#     to disambiguate, not the eval.
+
+# ─── PDV (Law text — clean article-number grading) ─────────────────────────
+
+- id: pdv_001
+  query: "Kolika je opća stopa PDV-a?"
+  expected_articles: ["38"]
+  expected_keywords: ["25%"]
+  expected_category: PDV
+  in_corpus: true
+  notes: "Baseline. Single-article answer."
+
+- id: pdv_002
+  query: "Koja je porezna osnovica kod uvoza dobara?"
+  expected_articles: ["35"]
+  expected_keywords: ["carinska vrijednost"]
+  expected_category: PDV
+  in_corpus: true
+  notes: "Tests discrimination from Članak 34 (adjacent topic)."
+
+- id: pdv_003
+  query: "Što su porezni obveznici i tko nije porezni obveznik?"
+  expected_articles: ["6"]
+  expected_keywords: ["gospodarsku djelatnost"]
+  expected_category: PDV
+  in_corpus: true
+  notes: "Definition question. Članak 6 spans multiple chunks."
+
+- id: pdv_004
+  query: "Kada se PDV obračunava po sniženoj stopi?"
+  expected_articles: ["38"]
+  expected_keywords: ["5%", "13%"]
+  expected_category: PDV
+  in_corpus: true
+  notes: "Tests discrimination from Članak 37 (adjacent but wrong)."
+
+- id: pdv_005_paraphrase
+  query: "Koliki je standardni postotak PDV-a u Hrvatskoj?"
+  expected_articles: ["38"]
+  expected_keywords: ["25%"]
+  expected_category: PDV
+  in_corpus: true
+  notes: "Paraphrase of pdv_001. Tests semantic robustness."
+
+- id: pdv_006_deadline
+  query: "Koji je rok za predaju PDV obrasca?"
+  expected_articles: ["85"]
+  expected_keywords: ["20"]
+  expected_category: PDV
+  in_corpus: true
+  notes: "From benchmark.py — known good question."
+
+# ─── porezi (Tax articles — magazine content) ──────────────────────────────
+
+- id: porezi_001
+  query: "Kako se oporezuju dividende u Hrvatskoj?"
+  expected_articles: []
+  expected_keywords: ["dividend"]
+  expected_category: porezi
+  in_corpus: true
+  notes: "Magazine content. Tests classifier routing AND retrieval breadth."
+
+- id: porezi_002_dohodak
+  query: "Što je osobni odbitak u porezu na dohodak?"
+  expected_articles: []
+  expected_keywords: ["osobni odbitak"]
+  expected_category: porezi
+  in_corpus: true
+  notes: "Old classifier would output 'dohodak' which DB doesn't have. Tests the sync."
+
+- id: porezi_003_dobit
+  query: "Kako se računa porezna osnovica za porez na dobit?"
+  expected_articles: []
+  expected_keywords: ["porez na dobit"]
+  expected_category: porezi
+  in_corpus: true
+  notes: "Corporate income tax — different sub-domain than PDV/dohodak."
+
+# ─── računovodstvo (largest category — 5,479 chunks) ──────────────────────
+
+- id: rac_001_amortizacija
+  query: "Kako se knjiži amortizacija dugotrajne imovine?"
+  expected_articles: []
+  expected_keywords: ["amortizacij"]
+  expected_category: računovodstvo
+  in_corpus: true
+  notes: "Core accounting question. Should hit core RRiF magazine content."
+
+- id: rac_002_razvrstavanje
+  query: "Koji su kriteriji za razvrstavanje mikro poduzetnika?"
+  expected_articles: []
+  expected_keywords: ["mikro", "2.000.000"]
+  expected_category: računovodstvo
+  in_corpus: true
+  notes: "From benchmark.py. Note: classifier currently picks 'trgovačko pravo' — known ambiguity."
+
+- id: rac_003_bilanca
+  query: "Što sadrži bilanca i kako se sastavlja?"
+  expected_articles: []
+  expected_keywords: ["bilanca", "imovin"]
+  expected_category: računovodstvo
+  in_corpus: true
+  notes: "Definition / structure question."
+
+# ─── plaće (payroll — 750 chunks) ─────────────────────────────────────────
+
+- id: place_001_doprinosi
+  query: "Koliki su doprinosi iz plaće na teret radnika?"
+  expected_articles: []
+  expected_keywords: ["20%", "mirovinsk"]
+  expected_category: plaće
+  in_corpus: true
+  notes: "Old classifier had 'doprinosi' as separate category, mapped to 'plaće'. Tests merger."
+
+- id: place_002_bolovanje
+  query: "Kako se obračunava bolovanje za radnika?"
+  expected_articles: []
+  expected_keywords: ["bolovanj"]
+  expected_category: plaće
+  in_corpus: true
+  notes: "Smoke-tested in classifier. Confirm full pipeline finds answer."
+
+# ─── radno pravo (453 chunks) ─────────────────────────────────────────────
+
+- id: rp_001_otkaz
+  query: "Koji su rokovi za otkaz ugovora o radu?"
+  expected_articles: []
+  expected_keywords: ["otkaz"]
+  expected_category: radno pravo
+  in_corpus: true
+  notes: "Old classifier output 'radno_pravo' (underscore) — DB has 'radno pravo' (space)."
+
+- id: rp_002_godisnji
+  query: "Koliko godišnjeg odmora pripada radniku?"
+  expected_articles: []
+  expected_keywords: ["godišnj", "odmor"]
+  expected_category: radno pravo
+  in_corpus: true
+  notes: "Common subscriber question."
+
+# ─── trgovačko pravo (267 chunks) ─────────────────────────────────────────
+
+- id: tp_001_doo
+  query: "Kako se osniva društvo s ograničenom odgovornošću?"
+  expected_articles: []
+  expected_keywords: ["d.o.o.", "osniva"]
+  expected_category: trgovačko pravo
+  in_corpus: true
+  notes: "Was unreachable category in old classifier. Tests new mapping."
+
+- id: tp_002_likvidacija
+  query: "Kako se provodi likvidacija trgovačkog društva?"
+  expected_articles: []
+  expected_keywords: ["likvidacij"]
+  expected_category: trgovačko pravo
+  in_corpus: true
+  notes: "Was unreachable. Distinct sub-topic."
+
+# ─── revizija (182 chunks) ────────────────────────────────────────────────
+
+- id: rev_001_mrevs
+  query: "Što je MRevS i tko ga primjenjuje?"
+  expected_articles: []
+  expected_keywords: ["MRevS", "revizij"]
+  expected_category: revizija
+  in_corpus: true
+  notes: "Was unreachable category. Smoke-tested in classifier."
+
+# ─── proračun (765 chunks) ────────────────────────────────────────────────
+
+- id: pr_001_javna_nabava
+  query: "Koje su nove obveze javne nabave za proračunske korisnike?"
+  expected_articles: []
+  expected_keywords: ["javn", "nabav"]
+  expected_category: proračun
+  in_corpus: true
+  notes: "Public sector procurement — proračun-specific topic."
+
+# ─── neprofitne organizacije (199 chunks) ─────────────────────────────────
+
+- id: npo_001_knjige
+  query: "Kako udruga vodi poslovne knjige?"
+  expected_articles: []
+  expected_keywords: ["udrug"]
+  expected_category: neprofitne organizacije
+  in_corpus: true
+  notes: "Was unreachable. Old classifier prompt routed NPO to 'proračun'."
+
+# ─── EU propisi (105 chunks) ──────────────────────────────────────────────
+
+- id: eu_001_uredba
+  query: "Što donosi nova EU uredba o digitalnim tržištima?"
+  expected_articles: []
+  expected_keywords: ["uredba", "EU"]
+  expected_category: EU propisi
+  in_corpus: true
+  notes: "Was unreachable category. Tests classifier breadth."
+
+# ─── poslovanje s inozemstvom (64 chunks) ─────────────────────────────────
+
+- id: pi_001_intrastat
+  query: "INTRASTAT prag za 2025."
+  expected_articles: []
+  expected_keywords: ["INTRASTAT"]
+  expected_category: poslovanje s inozemstvom
+  in_corpus: true
+  notes: "Was unreachable. Smoke-tested in classifier."
+
+- id: pi_002_transferne
+  query: "Što su transferne cijene?"
+  expected_articles: []
+  expected_keywords: ["transfern"]
+  expected_category: poslovanje s inozemstvom
+  in_corpus: true
+  notes: "Was unreachable. Common multinational topic."
+
+# ─── tržište i propisi (294 chunks) ───────────────────────────────────────
+
+- id: trz_001_potrosaci
+  query: "Koja prava imaju potrošači prema novom zakonu?"
+  expected_articles: []
+  expected_keywords: ["potrošač"]
+  expected_category: tržište i propisi
+  in_corpus: true
+  notes: "Was unreachable category."
+
+# ─── stručne informacije (43 chunks — small bucket, single test) ──────────
+
+- id: si_001
+  query: "Što je novo u tumačenjima Porezne uprave?"
+  expected_articles: []
+  expected_keywords: ["tumačenj", "Porezn"]
+  expected_category: stručne informacije
+  in_corpus: true
+  notes: "Was unreachable. Small category; single representative question."
+
+# ─── Trap questions (no expected category — test refusal) ─────────────────
+
+- id: trap_001_outside_corpus
+  query: "Kolika je stopa poreza na nasljedstvo u Sloveniji?"
+  expected_articles: []
+  expected_keywords: []
+  expected_category: ostalo
+  in_corpus: false
+  notes: "Foreign jurisdiction. Agent should refuse and redirect to advisor."
+
+- id: trap_002_fictional
+  query: "Što kaže članak 99. Zakona o fiktivnom porezu na digitalne usluge?"
+  expected_articles: []
+  expected_keywords: []
+  expected_category: ostalo
+  in_corpus: false
+  notes: "Fictional law. Hallucination trap. Critical for trust."
+
+- id: trap_003_gdpr_gap
+  query: "Kako podnijeti zahtjev za pristup osobnim podacima prema GDPR-u?"
+  expected_articles: []
+  expected_keywords: []
+  expected_category: ostalo
+  in_corpus: false
+  notes: |
+    GDPR is a known content gap (61 chunks total, scattered across 6 categories,
+    no dedicated GDPR coverage). Honest test: does the agent admit the gap rather
+    than fabricate from incidental mentions? Classifier output 'ostalo' is
+    correct — flag the content gap to RRiF rather than pretend to answer.

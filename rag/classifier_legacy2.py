@@ -58,21 +58,8 @@ Pravila za subdomains:
 - Za pitanja van tematskog opsega (strani porezi, GDPR, IT) navedi ["ostalo"].
 - Koristi ISKLJUČIVO vrijednosti iz taksonomije — nikad ne izmišljaj nove.
 
-Napomena za PDV: pojmovi kao što su "porezni obveznik", "porezna osnovica", "pretporez", "oslobođenje od PDV-a",
-"upis u registar PDV-a", "uvoz dobara u kontekstu PDV-a" su PDV pojmovi — koristi subdomain "PDV", ne "porezi".
-"porezi" subdomain koristiti samo za doprinose, carine, trošarine i ostala davanja koja nisu PDV/dohodak/dobit.
-
 Primjeri:
 Pitanje: "Kolika je stopa PDV-a na hranu?"
-{{"subdomains": ["PDV"], "time_period": {{"type": "current", "date_from": null, "date_to": null}}, "recency_boost": false, "source_type_preference": null}}
-
-Pitanje: "Što su porezni obveznici i tko nije porezni obveznik?"
-{{"subdomains": ["PDV"], "time_period": {{"type": "current", "date_from": null, "date_to": null}}, "recency_boost": false, "source_type_preference": ["zakon"]}}
-
-Pitanje: "Koja je porezna osnovica kod uvoza dobara?"
-{{"subdomains": ["PDV"], "time_period": {{"type": "current", "date_from": null, "date_to": null}}, "recency_boost": false, "source_type_preference": ["zakon"]}}
-
-Pitanje: "Koji je rok za predaju PDV obrasca?"
 {{"subdomains": ["PDV"], "time_period": {{"type": "current", "date_from": null, "date_to": null}}, "recency_boost": false, "source_type_preference": null}}
 
 Pitanje: "Koji su doprinosi iz plaće na teret radnika?"
