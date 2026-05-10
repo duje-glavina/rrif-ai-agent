@@ -22,9 +22,11 @@ import psycopg
 from dotenv import load_dotenv
 from pgvector.psycopg import register_vector
 
+
 from rag.embedder import embed_query, MODEL_NAME as EMBEDDER_NAME
 from rag.retrieve.rerank import rerank, MODEL_NAME as RERANKER_NAME
 from rag.generate.answerer import answer, system_prompt_hash, DEFAULT_MODEL
+from rag.rewrite.rewriter import rewrite, REWRITER_MODEL
 
 load_dotenv()
 
@@ -38,6 +40,7 @@ LOGS_DIR.mkdir(parents=True, exist_ok=True)
 PRICING_PER_1K = {
     "claude-sonnet-4-6": {"input": 0.003, "output": 0.015},
     "claude-opus-4-7":   {"input": 0.015, "output": 0.075},
+    "claude-haiku-4-5":  {"input": 0.001, "output": 0.005},
     "claude-haiku-4-5-20251001": {"input": 0.001, "output": 0.005},
 }
 
@@ -162,9 +165,12 @@ def _semantic_candidates(query: str, n: int) -> list[dict]:
 # Public API
 # ---------------------------------------------------------------------------
 
+
 @dataclass
 class RunResult:
     query: str
+    rewritten_query: str
+    rewrite_changed: bool
     top_chunks: list[dict]
     answer_text: str
     refused: bool
@@ -174,7 +180,6 @@ class RunResult:
     total_latency_ms: int
     estimated_cost_usd: float | None
 
-
 def run_query(
     query: str,
     *,
@@ -182,11 +187,15 @@ def run_query(
     top_k: int = TOP_K,
     persist: bool = True,
     skip_generation: bool = False,
+    enable_rewrite: bool = False,
 ) -> RunResult:
     """Run query through retrieval + generation, log everything, return results.
 
     `skip_generation=True` returns retrieval-only results — useful for
     debugging the retrieval layer without spending API tokens.
+
+    `enable_rewrite=True` runs the query rewriter (Haiku) before classification
+    to clean up colloquial/abbreviated input. Default off for backward compat.
     """
     started_at = datetime.now(timezone.utc)
     pipeline_start = _now_ms()
@@ -195,6 +204,7 @@ def run_query(
         timestamp=started_at.isoformat(),
         query=query,
         config={
+            "rewriter": REWRITER_MODEL if enable_rewrite else None,
             "embedder": EMBEDDER_NAME,
             "reranker": RERANKER_NAME,
             "generator": DEFAULT_MODEL if not skip_generation else None,
@@ -211,12 +221,46 @@ def run_query(
     temporal_note: str | None = None
     estimated_cost: float | None = None
 
+    # The query that flows through the pipeline. If rewriting is enabled
+    # and succeeds, this becomes the rewritten version. All downstream
+    # stages (retrieval, rerank, generation) see only this.
+    effective_query = query
+    rewritten_query = query
+    rewrite_changed = False
+
     log_path = _log_path(query, started_at)
 
     try:
+        # Stage 0: query rewrite (optional)
+        if enable_rewrite:
+            t0 = _now_ms()
+            rw = rewrite(query)
+            rewritten_query = rw.rewritten
+            rewrite_changed = rw.changed
+            effective_query = rw.rewritten
+            rewrite_cost = _estimate_cost(
+                rw.model, rw.input_tokens, rw.output_tokens,
+            )
+            trace.add_stage(
+                name="query_rewrite",
+                latency_ms=int(_now_ms() - t0),
+                data={
+                    "model": rw.model,
+                    "original_query": rw.original,
+                    "rewritten_query": rw.rewritten,
+                    "changed": rw.changed,
+                    "input_tokens": rw.input_tokens,
+                    "output_tokens": rw.output_tokens,
+                    "estimated_cost_usd": rewrite_cost,
+                    "error": rw.error,
+                },
+            )
+            if rewrite_cost is not None:
+                estimated_cost = (estimated_cost or 0.0) + rewrite_cost
+
         # Stage 1: semantic retrieval
         t0 = _now_ms()
-        candidates = _semantic_candidates(query, n=candidate_pool)
+        candidates = _semantic_candidates(effective_query, n=candidate_pool)
         trace.add_stage(
             name="semantic_retrieval",
             latency_ms=int(_now_ms() - t0),
@@ -238,7 +282,7 @@ def run_query(
         # Stage 2: reranking
         t0 = _now_ms()
         rerank_input = [(c["chunk_id"], c["chunk_text"]) for c in candidates]
-        ranked = rerank(query, rerank_input, k=top_k)
+        ranked = rerank(effective_query, rerank_input, k=top_k)
         by_id = {c["chunk_id"]: c for c in candidates}
         top_chunks = []
         for cid, text, score in ranked:
@@ -263,13 +307,15 @@ def run_query(
             },
         )
 
-        # Stage 3: generation (optional)
+#           Stage 3: generation (optional)
         if not skip_generation:
             t0 = _now_ms()
-            gen = answer(query, top_chunks)
-            estimated_cost = _estimate_cost(
+            gen = answer(effective_query, top_chunks)
+            gen_cost = _estimate_cost(
                 gen.model, gen.input_tokens, gen.output_tokens,
             )
+            if gen_cost is not None:
+                estimated_cost = (estimated_cost or 0.0) + gen_cost
             answer_text = gen.answer
             refused = gen.refused
             citations = gen.citations
@@ -303,6 +349,8 @@ def run_query(
 
     return RunResult(
         query=query,
+        rewritten_query=rewritten_query,
+        rewrite_changed=rewrite_changed,
         top_chunks=top_chunks,
         answer_text=answer_text,
         refused=refused,
@@ -313,17 +361,27 @@ def run_query(
         estimated_cost_usd=estimated_cost,
     )
 
-
 if __name__ == "__main__":
     import sys
     if len(sys.argv) < 2:
-        print('Usage: python -m rag.retrieve.runner "<query>"')
+        print('Usage: python -m rag.retrieve.runner [--rewrite] "<query>"')
         sys.exit(1)
-    q = " ".join(sys.argv[1:])
-    result = run_query(q)
+
+    args = sys.argv[1:]
+    enable_rewrite = False
+    if "--rewrite" in args:
+        enable_rewrite = True
+        args.remove("--rewrite")
+
+    q = " ".join(args)
+    result = run_query(q, enable_rewrite=enable_rewrite)
     print(f"\n{'=' * 70}")
-    print(f"Query:   {result.query}")
-    print(f"Latency: {result.total_latency_ms} ms")
+    print(f"\n{'=' * 70}")
+    print(f"Query:    {result.query}")
+    if enable_rewrite:
+        marker = "(changed)" if result.rewrite_changed else "(unchanged)"
+        print(f"Rewrite:  {result.rewritten_query}  {marker}")
+    print(f"Latency:  {result.total_latency_ms} ms")
     if result.estimated_cost_usd is not None:
         print(f"Cost:    ${result.estimated_cost_usd:.5f}")
     print(f"Trace:   {result.trace_path}")
