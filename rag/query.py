@@ -29,6 +29,7 @@ from rag.classifier import ClassifierResult, classify
 from rag.embedder import embed_query
 from rag.retrieve.rerank import rerank
 from rag.generate.answerer import answer as _generate_answer
+from rag.rewrite.rewriter import rewrite
 
 load_dotenv()
 
@@ -65,7 +66,9 @@ class QueryResponse:
     latency_ms: int = 0
     tokens_in: int = 0
     tokens_out: int = 0
-
+    original_query: str = ""
+    rewritten_query: str = ""
+    rewrite_changed: bool = False
     def to_dict(self) -> dict:
         return {
             "answer": self.answer,
@@ -89,9 +92,11 @@ class QueryResponse:
                 "latency_ms": self.latency_ms,
                 "tokens_in": self.tokens_in,
                 "tokens_out": self.tokens_out,
+                "original_query": self.original_query,
+                "rewritten_query": self.rewritten_query,
+                "rewrite_changed": self.rewrite_changed,
             },
         }
-
 
 # ── Retrieval helpers ─────────────────────────────────────────────────────────
 
@@ -283,10 +288,32 @@ def _generate(question: str, top_chunks: list[tuple], clf: ClassifierResult) -> 
 
 # ── Public API ────────────────────────────────────────────────────────────────
 
-def ask(question: str, verbose: bool = False) -> QueryResponse:
-    """Full RAG pipeline: classify → retrieve → rerank → generate."""
+def ask(
+    question: str,
+    verbose: bool = False,
+    enable_rewrite: bool = False,
+) -> QueryResponse:
+    """Full RAG pipeline: classify → retrieve → rerank → generate.
+
+    enable_rewrite: if True, run the Haiku query rewriter before classification
+                    to clean up colloquial/abbreviated input. Default off for
+                    backward compatibility.
+    """
     import time
     t_start = time.perf_counter()
+
+    # Step 0: Rewrite (optional)
+    original_query = question
+    rewritten_query = question
+    rewrite_changed = False
+    if enable_rewrite:
+        rw = rewrite(question)
+        rewritten_query = rw.rewritten
+        rewrite_changed = rw.changed
+        question = rw.rewritten  # downstream stages see the rewritten query
+        if verbose:
+            marker = "(changed)" if rw.changed else "(unchanged)"
+            print(f"[rewriter] {marker} → {rw.rewritten!r}")
 
     # Step 1: Classify
     clf = classify(question)
@@ -312,6 +339,9 @@ def ask(question: str, verbose: bool = False) -> QueryResponse:
             referred_to_advisor=True,
             classifier=clf,
             latency_ms=int((time.perf_counter() - t_start) * 1000),
+            original_query=original_query,
+            rewritten_query=rewritten_query,
+            rewrite_changed=rewrite_changed,
         )
 
     # Step 3: Rerank
@@ -330,6 +360,9 @@ def ask(question: str, verbose: bool = False) -> QueryResponse:
     # Step 4: Generate
     result = _generate(question, top_chunks, clf)
     result.latency_ms = int((time.perf_counter() - t_start) * 1000)
+    result.original_query = original_query
+    result.rewritten_query = rewritten_query
+    result.rewrite_changed = rewrite_changed
 
     if verbose:
         print(f"[generator] confidence={result.confidence} | "
@@ -346,13 +379,19 @@ if __name__ == "__main__":
     import sys
     logging.basicConfig(level=logging.WARNING)
 
-    question = " ".join(sys.argv[1:]) if len(sys.argv) > 1 else None
+    args = sys.argv[1:]
+    enable_rewrite = False
+    if "--rewrite" in args:
+        enable_rewrite = True
+        args.remove("--rewrite")
+
+    question = " ".join(args) if args else None
     if not question:
-        print("Usage: python -m rag.query <question>")
+        print("Usage: python -m rag.query [--rewrite] <question>")
         print('Example: python -m rag.query "Koji je rok za predaju PDV obrasca?"')
         sys.exit(1)
 
     print(f"\nPitanje: {question}\n{'='*60}")
-    result = ask(question, verbose=True)
+    result = ask(question, verbose=True, enable_rewrite=enable_rewrite)
     print(f"\n{'='*60}")
     print(json.dumps(result.to_dict(), ensure_ascii=False, indent=2))
