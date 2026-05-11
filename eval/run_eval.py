@@ -20,6 +20,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 from concurrent.futures import ThreadPoolExecutor, as_completed
 
+from sklearn import metrics
 import yaml
 
 sys.path.insert(0, str(Path(__file__).parent.parent))
@@ -92,9 +93,9 @@ def _keyword_hits(answer_text: str, keywords: list[str]) -> tuple[int, int]:
 # Core evaluation
 # ---------------------------------------------------------------------------
 
-def evaluate_one(item: dict, *, skip_generation: bool) -> dict:
+def evaluate_one(item: dict, *, skip_generation: bool, enable_rewrite: bool) -> dict:
     """Run one question through the full pipeline and grade the result."""
-    result = ask(item["query"])
+    result = ask(item["query"], enable_rewrite=enable_rewrite)
     # Classifier grading (new in v2)
     expected_cat = item.get("expected_category")
     actual_cat = result.classifier.category
@@ -203,6 +204,9 @@ def evaluate_one(item: dict, *, skip_generation: bool) -> dict:
         "keyword_hits": keyword_hits,
         "keyword_total": keyword_total,
         "passed": passed,
+        "original_query": result.original_query,
+        "rewritten_query": result.rewritten_query,
+        "rewrite_changed": result.rewrite_changed,
         "latency_ms": result.latency_ms,
         "cost_usd": cost,
     }
@@ -263,9 +267,15 @@ def aggregate(per_question: list[dict]) -> dict:
         metrics["avg_cost_usd"] = sum(costs) / len(costs) if costs else None
         metrics["total_cost_usd"] = sum(costs) if costs else None
 
+    # Rewrite metrics — populated in every run (whether --rewrite was used or not).
+    # When --rewrite is off, n_rewrites_changed will simply be 0.
+    rewrites_changed = [r for r in per_question if r.get("rewrite_changed")]
+    metrics["n_rewrites_changed"] = len(rewrites_changed)
+    metrics["rewrite_change_rate"] = (
+        len(rewrites_changed) / n if n else None
+    )
+
     return metrics
-
-
 # ---------------------------------------------------------------------------
 # Main
 # ---------------------------------------------------------------------------
@@ -276,8 +286,9 @@ def main():
     parser.add_argument("--skip-generation", action="store_true",
                         help="Classify + retrieve only, skip answer generation (saves API cost)")
     parser.add_argument("--workers", type=int, default=5, help="Parallel workers")
+    parser.add_argument("--rewrite", action="store_true",
+                        help="Enable Haiku query rewriter before classification")
 
-    
     args = parser.parse_args()
 
     golden = load_golden_set()
@@ -291,9 +302,15 @@ def main():
 
     per_question = [None] * len(golden)
 
+
     with ThreadPoolExecutor(max_workers=args.workers) as executor:
         futures = {
-            executor.submit(evaluate_one, item, skip_generation=args.skip_generation): i
+            executor.submit(
+                evaluate_one,
+                item,
+                skip_generation=args.skip_generation,
+                enable_rewrite=args.rewrite,
+            ): i
             for i, item in enumerate(golden)
         }
         for future in as_completed(futures):
@@ -314,7 +331,10 @@ def main():
                 bits.append(f"refused={result['refused']}")
             if result["cost_usd"] is not None:
                 bits.append(f"${result['cost_usd']:.5f}")
+
             print(f"[{i+1}/{len(golden)}] {item['id']}: {item['query']}")
+            if result.get("rewrite_changed"):
+                print(f"    ✏  rewritten: {result['rewritten_query']}")
             print(f"    {verdict}  {'  '.join(bits)}")
             if result["answer_preview"]:
                 print(f"    ↳ {result['answer_preview'][:200]}")
@@ -335,6 +355,8 @@ def main():
     print(f"  Overall pass rate:             {metrics['overall_pass_rate']:.1%}")
     print(f"  Avg latency:                   {metrics['avg_latency_ms']:.0f} ms")
     print(f"  Avg max rerank score:          {metrics['avg_max_rerank_score_in_corpus']:.4f}")
+    if args.rewrite:
+        print(f"  Rewrites changed:              {metrics['n_rewrites_changed']}/{metrics['n_questions']} ({metrics['rewrite_change_rate']:.1%})")
     if metrics.get("total_cost_usd") is not None:
         print(f"  Total cost (this run):         ${metrics['total_cost_usd']:.5f}")
         print(f"  Avg cost per question:         ${metrics['avg_cost_usd']:.5f}")
@@ -343,6 +365,8 @@ def main():
     label_parts = [args.note] if args.note else []
     if args.skip_generation:
         label_parts.append("retrieval_only")
+    if args.rewrite:
+        label_parts.append("rewrite_on")
     label = ("_" + "_".join(label_parts)) if label_parts else ""
     out_path = RESULTS_DIR / f"{timestamp}{label}.json"
     out_path.write_text(
@@ -351,6 +375,7 @@ def main():
                 "timestamp": timestamp,
                 "note": args.note,
                 "skip_generation": args.skip_generation,
+                "rewrite_enabled": args.rewrite,
                 "metrics": metrics,
                 "per_question": per_question,
             },
