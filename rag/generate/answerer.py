@@ -60,8 +60,9 @@ ANSWER_TOOL_SCHEMA = {
                 "description": (
                     "The answer text in Croatian. Plain text only — do not "
                     "wrap in markdown code fences or include any JSON "
-                    "structures. Cite sources inline using parentheses, "
-                    "e.g. '(Zakon o PDV-u, NN 73/2013, čl. 38)'."
+                    "structures. Cite sources inline using parentheses. "
+                    "For laws: '(Zakon o PDV-u, NN 73/2013, čl. 38)'. "
+                    "For magazine articles: '(RRiF br. 4/2024, autor: I. Horvat)'."
                 ),
             },
             "citations": {
@@ -75,26 +76,42 @@ ANSWER_TOOL_SCHEMA = {
                     "properties": {
                         "law_name": {
                             "type": ["string", "null"],
-                            "description": "e.g. 'Zakon o PDV-u'",
+                            "description": (
+                                "For laws: e.g. 'Zakon o PDV-u'. "
+                                "For magazine articles: the full publication citation, "
+                                "e.g. 'RRiF br. 4/2024' or 'Porezno i pravno (PiP) br. 12/2024'."
+                            ),
                         },
                         "nn_reference": {
                             "type": ["string", "null"],
-                            "description": "e.g. 'NN 73/2013'",
+                            "description": (
+                                "For laws: e.g. 'NN 73/2013'. "
+                                "For magazine articles: null."
+                            ),
                         },
                         "article_number": {
                             "type": ["string", "null"],
                             "description": (
-                                "ONLY the bare article number with no prefix. "
+                                "For laws: ONLY the bare article number with no prefix. "
                                 "Correct: '38', '38a', '12', '85'. "
-                                "Wrong: 'čl. 38', 'članak 38', '38. st. 1.', "
-                                "'čl. 12. st. 8. Zakona o porezu na dobit'. "
+                                "Wrong: 'čl. 38', 'članak 38', '38. st. 1.'. "
                                 "If the article has sub-paragraphs (st.) or points (t.), "
                                 "use ONLY the main article number. "
-                                "Use null if the citation has no article number."
+                                "For magazine articles: use the article title, "
+                                "e.g. 'Amortizacija dugotrajne imovine'. "
+                                "Use null if neither applies."
+                            ),
+                        },
+                        "author": {
+                            "type": ["string", "null"],
+                            "description": (
+                                "For magazine articles: the author as shown in the "
+                                "Autor field of the source, e.g. 'Dr. sc. Tamara Cirkveni'. "
+                                "For laws: null."
                             ),
                         },
                     },
-                    "required": ["law_name", "nn_reference", "article_number"],
+                    "required": ["law_name", "nn_reference", "article_number", "author"],
                 },
             },
             "temporal_note": {
@@ -111,7 +128,6 @@ ANSWER_TOOL_SCHEMA = {
     },
 }
 
-
 # ---------------------------------------------------------------------------
 # System prompt — narrower than before because the schema does the heavy lifting
 # ---------------------------------------------------------------------------
@@ -122,7 +138,7 @@ PRAVILA KOJA STROGO POŠTUJEŠ:
 
 1. Odgovaraj ISKLJUČIVO na temelju dostavljenih izvora u odjeljku "KONTEKST". Ne koristi vlastito predznanje.
 
-2. Svaki činjenični navod u tekstu odgovora popraćen je citatom izvora unutar zagrada, npr.: "(Zakon o PDV-u, NN 73/2013, čl. 38)". Citiraj samo izvore koji su ti dostavljeni.
+2. Svaki činjenični navod u tekstu odgovora popraćen je citatom izvora unutar zagrada, npr.: '(Zakon o PDV-u, NN 73/2013, čl. 38)' ili '(RRiF br. 4/2024, autor: I. Horvat)'. Citiraj samo izvore koji su ti dostavljeni.
 
 3. Ako dostavljeni kontekst ne sadrži pouzdan odgovor:
    - Postavi refused=true
@@ -156,12 +172,25 @@ def format_context(chunks: list[dict]) -> str:
     blocks: list[str] = []
     for i, c in enumerate(chunks, start=1):
         meta_lines = [f"[Izvor {i}]"]
-        if c.get("law_name"):
-            meta_lines.append(f"Zakon: {c['law_name']}")
-        if c.get("nn_reference"):
-            meta_lines.append(f"Narodne novine: {c['nn_reference']}")
-        if c.get("article_number"):
-            meta_lines.append(f"Članak: {c['article_number']}")
+
+        if c.get("source_type") == "članak":
+            # Magazine article — surface publication metadata
+            if c.get("pub_label"):
+                meta_lines.append(f"Publikacija: {c['pub_label']}")
+            if c.get("title"):
+                meta_lines.append(f"Naslov članka: {c['title']}")
+            if c.get("author"):
+                meta_lines.append(f"Autor: {c['author']}")
+            meta_lines.append(f"Izvor: {c.get('source', '')}")
+        else:
+            # Law / other — existing fields
+            if c.get("law_name"):
+                meta_lines.append(f"Zakon: {c['law_name']}")
+            if c.get("nn_reference"):
+                meta_lines.append(f"Narodne novine: {c['nn_reference']}")
+            if c.get("article_number"):
+                meta_lines.append(f"Članak: {c['article_number']}")
+
         validity = []
         if c.get("valid_from"):
             validity.append(f"od {c['valid_from']}")
@@ -176,7 +205,6 @@ def format_context(chunks: list[dict]) -> str:
         blocks.append("\n".join(meta_lines))
 
     return "\n\n---\n\n".join(blocks)
-
 
 # ---------------------------------------------------------------------------
 # Response data class — kept compatible with the previous version

@@ -53,6 +53,7 @@ class Citation:
     valid_from: str | None = None
     valid_to: str | None = None
     excerpt: str = ""
+    author: str | None = None
 
 
 @dataclass
@@ -79,6 +80,7 @@ class QueryResponse:
                     "valid_from": c.valid_from,
                     "valid_to": c.valid_to,
                     "excerpt": c.excerpt,
+                    "author": c.author,
                 }
                 for c in self.citations
             ],
@@ -139,7 +141,8 @@ def _semantic_fts_search(
                     cur.execute(
                         f"""
                         SELECT id, chunk_text, source, article_number,
-                               valid_from::text, valid_to::text
+                            valid_from::text, valid_to::text,
+                            source_type, extra_metadata
                         FROM chunks
                         WHERE {where_sql}
                           AND to_tsvector('simple', chunk_text)
@@ -162,7 +165,8 @@ def _semantic_fts_search(
             cur.execute(
                 f"""
                 SELECT id, chunk_text, source, article_number,
-                       valid_from::text, valid_to::text
+                       valid_from::text, valid_to::text,
+                       source_type, extra_metadata
                 FROM chunks
                 WHERE {where_sql}
                 ORDER BY embedding <=> %s
@@ -189,10 +193,15 @@ def _rrf_merge(sem_rows: dict, fts_rows: dict) -> list[tuple]:
         if rid in fts_ranks:
             score += 1.0 / (RRF_K + fts_ranks[rid])
         row = sem_rows.get(rid) or fts_rows.get(rid)
-        scored.append((score, row[0], row[1], row[2], row[3], row[4], row[5]))
+        scored.append((
+            score,
+            row[0], row[1], row[2], row[3], row[4], row[5],
+            row[6] if len(row) > 6 else None,
+            row[7] if len(row) > 7 else None,
+        ))
 
     scored.sort(reverse=True)
-    return [(r[1], r[2], r[3], r[4], r[5], r[6]) for r in scored[:CANDIDATES]]
+    return [(r[1], r[2], r[3], r[4], r[5], r[6],r[7], r[8]) for r in scored[:CANDIDATES]]
 
 
 def _retrieve(question: str, clf: ClassifierResult) -> list[tuple]:
@@ -245,16 +254,22 @@ def _generate(question: str, top_chunks: list[tuple], clf: ClassifierResult) -> 
 
     chunks_for_answerer: list[dict] = []
     for row in top_chunks:
+        em = row[7] if len(row) > 7 and row[7] else {}
         chunks_for_answerer.append({
-            "chunk_id":     row[0] if len(row) > 0 else None,
-            "chunk_text":   row[1] if len(row) > 1 else "",
-            "source":       row[2] if len(row) > 2 else "",
-            "law_name":     None,
-            "nn_reference": None,
+            "chunk_id":       row[0] if len(row) > 0 else None,
+            "chunk_text":     row[1] if len(row) > 1 else "",
+            "source":         row[2] if len(row) > 2 else "",
+            "law_name":       None,
+            "nn_reference":   None,
             "article_number": row[3] if len(row) > 3 else None,
-            "valid_from":   row[4] if len(row) > 4 else None,
-            "valid_to":     row[5] if len(row) > 5 else None,
-            "status":       "vazeci" if not (row[5] if len(row) > 5 else None) else "nevazeci",
+            "valid_from":     row[4] if len(row) > 4 else None,
+            "valid_to":       row[5] if len(row) > 5 else None,
+            "status":         "vazeci" if not (row[5] if len(row) > 5 else None) else "nevazeci",
+            "source_type":    row[6] if len(row) > 6 else None,
+            "pub_label":      em.get("pub_label", ""),
+            "title":          em.get("title", ""),
+            "author":         em.get("author", ""),
+            "article_num":    em.get("article_num", ""),
         })
 
     t0 = time.perf_counter()
@@ -268,6 +283,7 @@ def _generate(question: str, top_chunks: list[tuple], clf: ClassifierResult) -> 
             valid_from=None,
             valid_to=None,
             excerpt="",
+            author=c.get("author"),
         )
         for c in gen.citations
     ]
