@@ -132,17 +132,22 @@ def _semantic_fts_search(
 ) -> tuple[dict, dict]:
     """Run semantic + FTS search. Returns (sem_rows, fts_rows) dicts keyed by chunk id."""
     fts_rows: dict = {}
-    words = [w for w in question.split() if len(w) >= 3]
-    if words:
-        tsquery = " | ".join(words)
-        try:
-            with psycopg.connect(os.environ["DATABASE_URL"]) as conn_fts:
-                with conn_fts.cursor() as cur:
+    sem_rows: dict = {}
+
+    with psycopg.connect(os.environ["DATABASE_URL"]) as conn:
+        register_vector(conn)
+        with conn.cursor() as cur:
+
+            # FTS search
+            words = [w for w in question.split() if len(w) >= 3]
+            if words:
+                tsquery = " | ".join(words)
+                try:
                     cur.execute(
                         f"""
                         SELECT id, chunk_text, source, article_number,
-                            valid_from::text, valid_to::text,
-                            source_type, extra_metadata
+                               valid_from::text, valid_to::text,
+                               source_type, extra_metadata
                         FROM chunks
                         WHERE {where_sql}
                           AND to_tsvector('simple', chunk_text)
@@ -156,12 +161,10 @@ def _semantic_fts_search(
                         params + [tsquery, tsquery, n],
                     )
                     fts_rows = {row[0]: row for row in cur.fetchall()}
-        except Exception as e:
-            log.warning("FTS search failed: %s", e)
+                except Exception as e:
+                    log.warning("FTS search failed: %s", e)
 
-    with psycopg.connect(os.environ["DATABASE_URL"]) as conn_vec:
-        register_vector(conn_vec)
-        with conn_vec.cursor() as cur:
+            # Semantic search
             cur.execute(
                 f"""
                 SELECT id, chunk_text, source, article_number,
