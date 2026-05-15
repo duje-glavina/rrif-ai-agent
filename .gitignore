@@ -10,4 +10,10 @@ venv/
 .idea/
 *.log
 benchmark/results/*.tmp
+
+
 logs/
+eval/results/
+# but keep the folder markers
+!logs/.gitkeep
+!eval/results/.gitkeep
