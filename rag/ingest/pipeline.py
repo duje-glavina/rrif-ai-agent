@@ -40,7 +40,7 @@ class SourceMetadata:
 _INSERT_SQL = """
 INSERT INTO chunks (
     chunk_text, embedding,
-    category, source_type, source,
+    category_legacy, source_type, source,
     law_name, article_number, nn_reference,
     valid_from, valid_to, status, citable,
     chunk_index, total_chunks, extra_metadata

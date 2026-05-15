@@ -15,7 +15,7 @@ load_dotenv()
 with psycopg.connect(os.environ['DATABASE_URL']) as conn:
     with conn.cursor() as cur:
         # Check current state
-        cur.execute("SELECT status, count(*) FROM chunks WHERE category='PDV' AND source_type='zakon' GROUP BY status")
+        cur.execute("SELECT status, count(*) FROM chunks WHERE category_legacy='PDV' AND source_type='zakon' GROUP BY status")
         print("Before:")
         for row in cur.fetchall():
             print(f"  status={row[0]}  count={row[1]}")
@@ -24,12 +24,12 @@ with psycopg.connect(os.environ['DATABASE_URL']) as conn:
         cur.execute("""
             UPDATE chunks
             SET status = 'vazeci', valid_to = NULL
-            WHERE category = 'PDV' AND source_type = 'zakon'
+            WHERE category_legacy = 'PDV' AND source_type = 'zakon'
         """)
         print(f"\nUpdated {cur.rowcount} rows.")
 
         # Verify
-        cur.execute("SELECT status, count(*) FROM chunks WHERE category='PDV' AND source_type='zakon' GROUP BY status")
+        cur.execute("SELECT status, count(*) FROM chunks WHERE category_legacy='PDV' AND source_type='zakon' GROUP BY status")
         print("\nAfter:")
         for row in cur.fetchall():
             print(f"  status={row[0]}  count={row[1]}")
