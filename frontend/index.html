@@ -1,0 +1,432 @@
+<!DOCTYPE html>
+<html lang="hr">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>RRiF AI Agent</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link href="https://fonts.googleapis.com/css2?family=Instrument+Serif:ital@0;1&family=DM+Mono:wght@400;500&family=DM+Sans:opsz,wght@9..40,300;9..40,400;9..40,500&display=swap" rel="stylesheet">
+<style>
+:root{--bg:#F4F2ED;--surface:#FFFFFF;--border:#E0DBD3;--text:#18160F;--muted:#8C8579;--accent:#1B4F8A;--accent-lt:#EAF0F8;--success:#1A6E42;--warn:#A86A00;--danger:#B52B1E;--panel:320px;--r:5px;--mono:'DM Mono',monospace;--serif:'Instrument Serif',serif;--sans:'DM Sans',sans-serif}
+*,*::before,*::after{box-sizing:border-box;margin:0;padding:0}
+body{font-family:var(--sans);background:var(--bg);color:var(--text);min-height:100vh;overflow-x:hidden}
+/* LOGIN */
+#L{min-height:100vh;display:flex;align-items:center;justify-content:center}
+.lc{background:var(--surface);border:1px solid var(--border);border-radius:8px;padding:40px 44px 44px;width:360px;box-shadow:0 2px 16px rgba(0,0,0,.06)}
+.ll{font-family:var(--serif);font-size:24px;color:var(--accent);margin-bottom:4px}
+.ls{font-size:12px;color:var(--muted);margin-bottom:32px;font-family:var(--mono);letter-spacing:.05em;text-transform:uppercase}
+.lf{margin-bottom:16px}
+.lf label{display:block;font-size:11px;font-weight:500;color:var(--muted);letter-spacing:.06em;text-transform:uppercase;margin-bottom:6px}
+.lf select,.lf input{width:100%;font-family:var(--sans);font-size:14px;color:var(--text);background:var(--bg);border:1px solid var(--border);border-radius:var(--r);padding:9px 12px;transition:border-color .15s;appearance:none}
+.lf select{background-image:url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='10' height='6' fill='none'%3E%3Cpath d='M1 1l4 4 4-4' stroke='%238C8579' stroke-width='1.5' stroke-linecap='round' stroke-linejoin='round'/%3E%3C/svg%3E");background-repeat:no-repeat;background-position:right 12px center;padding-right:32px;cursor:pointer}
+.lf input[type=password]{letter-spacing:.1em}
+.lf select:focus,.lf input:focus{outline:none;border-color:var(--accent)}
+.le{font-size:12px;color:var(--danger);margin-bottom:12px;min-height:18px}
+.lb{width:100%;font-family:var(--sans);font-size:14px;font-weight:500;color:#fff;background:var(--accent);border:none;border-radius:var(--r);padding:11px;cursor:pointer;transition:opacity .15s;margin-top:4px}
+.lb:hover{opacity:.88}
+/* APP */
+#A{display:none;min-height:100vh;flex-direction:column}
+#A.v{display:flex}
+header{background:var(--surface);border-bottom:1px solid var(--border);height:52px;padding:0 28px;display:flex;align-items:center;justify-content:space-between;position:sticky;top:0;z-index:100;flex-shrink:0}
+.hl{display:flex;align-items:baseline;gap:10px}
+.hlo{font-family:var(--serif);font-size:19px;color:var(--accent)}
+.hb{font-family:var(--mono);font-size:10px;color:var(--muted);border:1px solid var(--border);padding:2px 7px;border-radius:3px;letter-spacing:.08em;text-transform:uppercase}
+.hr2{display:flex;align-items:center;gap:14px}
+.ha{font-size:13px;color:var(--muted)}
+.ha strong{color:var(--text);font-weight:500}
+.blo{font-family:var(--sans);font-size:12px;color:var(--muted);background:transparent;border:1px solid var(--border);border-radius:var(--r);padding:5px 12px;cursor:pointer;transition:all .15s}
+.blo:hover{border-color:var(--danger);color:var(--danger)}
+/* BODY */
+.ab{flex:1;display:grid;grid-template-columns:1fr var(--panel);max-width:1320px;width:100%;margin:0 auto;padding:28px 28px 0;gap:0;align-items:start;min-width:0}
+.mc{padding-right:28px;border-right:1px solid var(--border);display:flex;flex-direction:column;gap:16px;min-height:calc(100vh - 52px - 28px);min-width:0}
+/* Banner */
+.ib{background:var(--accent-lt);border:1px solid #C5D9EF;border-radius:var(--r);padding:10px 14px;display:flex;align-items:flex-start;gap:10px;font-size:13px;color:var(--accent);line-height:1.5}
+.bi{flex-shrink:0;margin-top:1px}
+/* Empty */
+.es{flex:1;display:flex;flex-direction:column;align-items:center;justify-content:center;padding:60px 0;gap:14px;text-align:center;color:var(--muted)}
+.ei{width:44px;height:44px;border:1.5px solid var(--border);border-radius:50%;display:flex;align-items:center;justify-content:center}
+.et{font-family:var(--serif);font-size:20px;color:var(--text)}
+.ess{font-size:13px;max-width:340px;line-height:1.65}
+/* Answer */
+.ac{background:var(--surface);border:1px solid var(--border);border-radius:var(--r);overflow:hidden}
+.as{height:3px}
+.sh{background:var(--success)}.sl{background:var(--warn)}.sr{background:var(--danger)}
+.abo{padding:18px 20px;font-size:14px;line-height:1.8;color:var(--text)}
+.abo strong{font-weight:600}
+.abo p+p{margin-top:10px}
+.cr{padding:10px 20px;border-top:1px solid var(--border);display:flex;align-items:center;flex-wrap:wrap;gap:6px}
+.cl2{font-size:11px;font-weight:500;color:var(--muted);letter-spacing:.05em;text-transform:uppercase;margin-right:2px;flex-shrink:0}
+.ct{font-family:var(--mono);font-size:11px;color:var(--accent);background:var(--accent-lt);border:1px solid #C5D9EF;padding:3px 8px;border-radius:3px;white-space:nowrap}
+.rr{padding:9px 20px;border-top:1px solid var(--border);display:flex;align-items:center;gap:8px;font-size:12px;color:var(--warn);font-weight:500}
+.mr{padding:8px 20px;border-top:1px solid var(--border);display:flex;align-items:center;gap:8px;flex-wrap:wrap}
+.mp{display:inline-flex;align-items:center;gap:5px;font-family:var(--mono);font-size:11px;color:var(--muted);border:1px solid var(--border);padding:3px 8px;border-radius:3px}
+/* Feedback */
+.fr{padding:10px 20px;border-top:1px solid var(--border);display:flex;align-items:center;gap:10px}
+.fl{font-size:12px;font-weight:500;color:var(--muted);flex-shrink:0;display:flex;align-items:center;gap:5px}
+.tb{width:32px;height:32px;border:1px solid var(--border);border-radius:var(--r);background:transparent;cursor:pointer;display:flex;align-items:center;justify-content:center;font-size:15px;transition:all .15s;flex-shrink:0}
+.tb:hover{border-color:var(--accent);background:var(--accent-lt)}
+.tb.au{background:#E6F4EE;border-color:var(--success)}
+.tb.ad{background:#FAECEA;border-color:var(--danger)}
+.fs{font-size:12px;color:var(--success);font-weight:500;display:flex;align-items:center;gap:5px}
+.df{display:none;flex-direction:column;gap:12px;padding:14px 20px 16px;border-top:1px solid var(--border);background:#FAFAF7}
+.df.o{display:flex}
+.df label{display:flex;align-items:center;gap:5px;font-size:11px;font-weight:500;color:var(--muted);letter-spacing:.05em;text-transform:uppercase;margin-bottom:5px}
+.fg{display:grid;grid-template-columns:1fr 1fr;gap:12px}
+.df select,.df textarea{width:100%;font-family:var(--sans);font-size:13px;color:var(--text);background:var(--surface);border:1px solid var(--border);border-radius:var(--r);padding:7px 10px;transition:border-color .15s;resize:vertical;appearance:none}
+.df select{background-image:url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='10' height='6' fill='none'%3E%3Cpath d='M1 1l4 4 4-4' stroke='%238C8579' stroke-width='1.5' stroke-linecap='round' stroke-linejoin='round'/%3E%3C/svg%3E");background-repeat:no-repeat;background-position:right 10px center;padding-right:28px;cursor:pointer}
+.df select:focus,.df textarea:focus{outline:none;border-color:var(--accent)}
+.bsf{align-self:flex-end;font-family:var(--sans);font-size:12px;font-weight:500;color:#fff;background:var(--accent);border:none;border-radius:var(--r);padding:7px 16px;cursor:pointer;transition:opacity .15s}
+.bsf:hover{opacity:.85}
+.bsf:disabled{opacity:.4;cursor:not-allowed}
+/* Loading */
+.lc2{background:var(--surface);border:1px solid var(--border);border-radius:var(--r);padding:18px 20px;display:flex;align-items:center;gap:12px;font-size:13px;color:var(--muted)}
+.dots span{width:6px;height:6px;border-radius:50%;background:var(--muted);animation:bn 1.2s infinite;display:inline-block;margin-right:3px}
+.dots span:nth-child(2){animation-delay:.2s}
+.dots span:nth-child(3){animation-delay:.4s}
+@keyframes bn{0%,80%,100%{transform:translateY(0);opacity:.35}40%{transform:translateY(-5px);opacity:1}}
+/* Input */
+.ia{position:sticky;bottom:0;background:var(--bg);padding:14px 0 24px;border-top:1px solid var(--border);margin-top:16px}
+.iw{display:flex;gap:10px;align-items:flex-end}
+textarea#Q{flex:1;font-family:var(--sans);font-size:14px;color:var(--text);background:var(--surface);border:1px solid var(--border);border-radius:var(--r);padding:10px 14px;resize:none;min-height:42px;max-height:140px;line-height:1.55;transition:border-color .15s;overflow-y:auto}
+textarea#Q:focus{outline:none;border-color:var(--accent)}
+textarea#Q::placeholder{color:var(--muted)}
+.bs{width:42px;height:42px;border-radius:var(--r);border:none;background:var(--accent);color:#fff;cursor:pointer;display:flex;align-items:center;justify-content:center;flex-shrink:0;transition:opacity .15s,transform .1s}
+.bs:hover{opacity:.85}
+.bs:active{transform:scale(.95)}
+.bs:disabled{opacity:.35;cursor:not-allowed}
+.ih{font-size:11px;color:var(--muted);margin-top:6px;display:flex;align-items:center;gap:4px}
+/* PANEL */
+.rp{padding-left:24px;position:sticky;top:80px;display:flex;flex-direction:column;gap:0;max-height:calc(100vh - 100px);overflow-y:auto}
+.ps{padding-bottom:20px;margin-bottom:20px;border-bottom:1px solid var(--border)}
+.ps:last-child{border-bottom:none}
+.pt{font-family:var(--mono);font-size:10px;font-weight:500;letter-spacing:.1em;text-transform:uppercase;color:var(--muted);margin-bottom:10px;display:flex;align-items:center;gap:6px}
+.cq{font-size:13px;line-height:1.55;color:var(--text);font-style:italic;font-family:var(--serif);padding:10px 12px;background:var(--accent-lt);border:1px solid #C5D9EF;border-radius:var(--r);min-height:42px}
+.cq.e{color:var(--muted);font-style:normal;font-family:var(--sans);font-size:12px;background:var(--bg);border-color:var(--border)}
+.hl2{display:flex;flex-direction:column;gap:2px;max-height:200px;overflow-y:auto}
+.hi{display:flex;align-items:flex-start;gap:8px;padding:7px 10px;border-radius:var(--r);cursor:pointer;transition:background .12s;border:1px solid transparent}
+.hi:hover{background:var(--surface);border-color:var(--border)}
+.hi.act{background:var(--surface);border-color:var(--border)}
+.hn{font-family:var(--mono);font-size:10px;color:var(--muted);flex-shrink:0;margin-top:2px;min-width:18px}
+.ht{font-size:12px;color:var(--text);line-height:1.45;overflow:hidden;display:-webkit-box;-webkit-line-clamp:2;-webkit-box-orient:vertical}
+.he{font-size:12px;color:var(--muted);padding:4px 0}
+.hn2{font-size:11px;color:var(--muted);margin-top:8px;display:flex;align-items:flex-start;gap:5px;line-height:1.5}
+/* Stats */
+.sg{display:grid;grid-template-columns:1fr 1fr;gap:8px;margin-bottom:10px}
+.sc2{background:var(--surface);border:1px solid var(--border);border-radius:var(--r);padding:10px 12px}
+.sv{font-family:var(--serif);font-size:24px;color:var(--text);line-height:1;margin-bottom:3px}
+.sla{font-size:11px;color:var(--muted)}
+.ab2{height:5px;background:var(--border);border-radius:3px;overflow:hidden;margin:6px 0 4px}
+.af{height:100%;background:var(--success);border-radius:3px;transition:width .5s;width:0%}
+.an{display:flex;justify-content:space-between;font-family:var(--mono);font-size:10px;color:var(--muted)}
+.vl{display:flex;flex-direction:column;gap:5px}
+.vi{display:flex;align-items:center;gap:7px;font-size:12px}
+.vd{width:7px;height:7px;border-radius:50%;flex-shrink:0}
+.vc{background:var(--success)}.vp{background:var(--warn)}.vw{background:var(--danger)}.vu{background:var(--border)}
+.vn{flex:1;color:var(--text)}.vm{font-family:var(--mono);font-size:11px;color:var(--muted)}
+.kl{display:flex;flex-direction:column;gap:5px}
+.ki{display:flex;justify-content:space-between;font-size:12px}
+.kn{color:var(--text)}.km{font-family:var(--mono);font-size:11px;color:var(--muted)}
+.br{width:100%;font-family:var(--sans);font-size:12px;font-weight:500;color:var(--muted);background:transparent;border:1px solid var(--border);border-radius:var(--r);padding:7px;cursor:pointer;transition:all .15s;margin-top:8px}
+.br:hover{border-color:var(--accent);color:var(--accent)}
+/* TOOLTIPS */
+.tw{position:relative;display:inline-flex;align-items:center}
+.ti{width:14px;height:14px;border-radius:50%;border:1px solid currentColor;display:inline-flex;align-items:center;justify-content:center;font-size:9px;font-weight:700;color:var(--muted);cursor:help;flex-shrink:0;font-style:normal;line-height:1;font-family:var(--mono);transition:color .15s,border-color .15s}
+.ti:hover{color:var(--accent);border-color:var(--accent)}
+.tt{position:absolute;bottom:calc(100% + 8px);left:50%;transform:translateX(-50%);background:var(--text);color:#fff;font-size:12px;font-family:var(--sans);font-weight:400;line-height:1.55;padding:8px 12px;border-radius:var(--r);white-space:normal;width:200px;pointer-events:none;opacity:0;transition:opacity .15s;z-index:200;text-transform:none;letter-spacing:0}
+.tt::after{content:'';position:absolute;top:100%;left:50%;transform:translateX(-50%);border:5px solid transparent;border-top-color:var(--text)}
+.tw:hover .tt{opacity:1}
+/* Right panel: anchor tooltip to right of icon, expand leftward, arrow on right */
+.rp .tw{position:static}
+.rp .tt{position:fixed;bottom:auto;left:auto;right:32px;transform:none;width:200px}
+.rp .tt::after{left:auto;right:10px;transform:none}
+/* TOAST */
+.toast{position:fixed;bottom:24px;left:50%;transform:translateX(-50%) translateY(12px);background:var(--text);color:#fff;font-size:13px;font-weight:500;padding:8px 18px;border-radius:var(--r);opacity:0;transition:all .2s;pointer-events:none;white-space:nowrap;z-index:300}
+.toast.show{opacity:1;transform:translateX(-50%) translateY(0)}
+::-webkit-scrollbar{width:4px;height:4px}
+::-webkit-scrollbar-track{background:transparent}
+::-webkit-scrollbar-thumb{background:var(--border);border-radius:2px}
+</style>
+</head>
+<body>
+
+<!-- LOGIN -->
+<div id="L">
+  <div class="lc">
+    <div class="ll">RRiF AI Agent</div>
+    <div class="ls">Pilot v0.1 &middot; Interno</div>
+    <div class="lf">
+      <label>Savjetnik</label>
+      <select id="lA">
+        <option value="">&#8212; Odaberite &#8212;</option>
+        <option>Savjetnik 1</option>
+        <option>Savjetnik 2</option>
+        <option>Savjetnik 3</option>
+      </select>
+    </div>
+    <div class="lf">
+      <label>Lozinka</label>
+      <input type="password" id="lP" placeholder="&#8226;&#8226;&#8226;&#8226;&#8226;&#8226;&#8226;&#8226;" autocomplete="off">
+    </div>
+    <div class="le" id="lE"></div>
+    <button class="lb" onclick="login()">Prijava</button>
+  </div>
+</div>
+
+<!-- APP -->
+<div id="A">
+  <header>
+    <div class="hl"><span class="hlo">RRiF AI Agent</span><span class="hb">PoC v0.1</span></div>
+    <div class="hr2">
+      <span class="ha">Prijavljeni kao: <strong id="hN">&#8212;</strong></span>
+      <button class="blo" onclick="logout()">Odjava</button>
+    </div>
+  </header>
+
+  <div class="ab">
+    <div class="mc">
+      <div class="ib">
+        <span class="bi"><svg width="15" height="15" fill="none" viewBox="0 0 24 24" stroke="currentColor" stroke-width="2"><path stroke-linecap="round" stroke-linejoin="round" d="M11.25 11.25l.041-.02a.75.75 0 011.063.852l-.708 2.836a.75.75 0 001.063.853l.041-.021M21 12a9 9 0 11-18 0 9 9 0 0118 0zm-9-3.75h.008v.008H12V8.25z"/></svg></span>
+        <span><strong>Svako pitanje je neovisno.</strong> Agent ne pamti prethodna pitanja unutar sesije niti izmedju sesija &mdash; svaki upit obraduje se zasebno, bez konteksta ranijeg razgovora.</span>
+      </div>
+      <div id="AA"></div>
+      <div class="ia">
+        <div class="iw">
+          <textarea id="Q" rows="1" placeholder="Npr. Kolika je stopa PDV-a na knjige?" maxlength="2000"></textarea>
+          <button class="bs" id="sB" onclick="send()">
+            <svg width="17" height="17" fill="none" viewBox="0 0 24 24" stroke="currentColor" stroke-width="2"><path stroke-linecap="round" stroke-linejoin="round" d="M6 12L3.269 3.126A59.768 59.768 0 0121.485 12 59.77 59.77 0 013.27 20.876L5.999 12zm0 0h7.5"/></svg>
+          </button>
+        </div>
+        <div class="ih"><svg width="11" height="11" fill="none" viewBox="0 0 24 24" stroke="currentColor" stroke-width="2"><path stroke-linecap="round" stroke-linejoin="round" d="M3.75 13.5l10.5-11.25L12 10.5h8.25L9.75 21.75 12 13.5H3.75z"/></svg> Enter za slanje &middot; Shift+Enter za novi red</div>
+      </div>
+    </div>
+
+    <div class="rp">
+      <div class="ps">
+        <div class="pt">Trenutni upit <span class="tw"><i class="ti">i</i><span class="tt">Prikazuje pitanje na koje je dan trenutno vidljivi odgovor. Postavite novo pitanje kako biste zamijenili prikaz.</span></span></div>
+        <div class="cq e" id="CQ">Jos nije postavljeno pitanje.</div>
+      </div>
+
+      <div class="ps">
+        <div class="pt">Povijest sesije <span class="tw"><i class="ti">i</i><span class="tt">Lista pitanja postavljenih u ovoj sesiji. Kliknite na pitanje kako biste vidjeli odgovor. Agent ne koristi ovu povijest pri odgovaranju.</span></span></div>
+        <div class="hl2" id="HL"><div class="he">Jos nema pitanja.</div></div>
+        <div class="hn2">
+          <svg width="12" height="12" fill="none" viewBox="0 0 24 24" stroke="currentColor" stroke-width="2" style="flex-shrink:0;margin-top:2px"><path stroke-linecap="round" stroke-linejoin="round" d="M12 9v3.75m9-.75a9 9 0 11-18 0 9 9 0 0118 0zm-9 3.75h.008v.008H12v-.008z"/></svg>
+          Agent ne vidi ovu povijest &mdash; svako pitanje obraduje se neovisno.
+        </div>
+      </div>
+
+      <div class="ps">
+        <div class="pt">Statistika <span class="tw"><i class="ti">i</i><span class="tt">Agregatni podaci svih savjetnika od pocetka pilota. Tocnost se racuna samo na temelju danih ocjena.</span></span></div>
+        <div class="sg">
+          <div class="sc2"><div class="sv" id="sQ">&#8212;</div><div class="sla">Ukupno upita</div></div>
+          <div class="sc2"><div class="sv" id="sF">&#8212;</div><div class="sla">Ocijenjeno</div></div>
+        </div>
+        <div style="margin:8px 0 4px;font-size:11px;color:var(--muted);display:flex;align-items:center;gap:5px">
+          Tocnost <span class="tw"><i class="ti">i</i><span class="tt">Stroga = udio ocijenjenih "Tocno". Prihvatljiva = "Tocno" + "Djelomicno tocno". Mjeri se prema kriterijima prihvacanja Faze 1.</span></span>
+        </div>
+        <div class="ab2"><div class="af" id="aB"></div></div>
+        <div class="an"><span id="aS">stroga: &#8212;</span><span id="aA">prihv.: &#8212;</span></div>
+        <div style="margin:12px 0 6px;font-size:11px;color:var(--muted);display:flex;align-items:center;gap:5px">
+          Ocjene odgovora <span class="tw"><i class="ti">i</i><span class="tt">"Tocno" = ispravan sadrzaj i izvor. "Djelomicno" = suština ispravna, detalj nedostaje. "Netocno" = pogresan sadrzaj ili izvor.</span></span>
+        </div>
+        <div class="vl" id="VL"><div style="font-size:12px;color:var(--muted)">Jos nema ocjena.</div></div>
+        <div style="margin:12px 0 6px;font-size:11px;color:var(--muted)">Upiti po kategoriji</div>
+        <div class="kl" id="KL"><div style="font-size:12px;color:var(--muted)">Jos nema upita.</div></div>
+        <button class="br" onclick="stats()">&#8635; Osvjezi statistiku</button>
+      </div>
+    </div>
+  </div>
+</div>
+
+<div class="toast" id="T"></div>
+
+<script>
+const C={'Savjetnik 1':'password1','Savjetnik 2':'password2','Savjetnik 3':'password3'};
+let adv=null,hist=[],ai=null;
+
+document.getElementById('lP').addEventListener('keydown',e=>{if(e.key==='Enter')login();});
+
+function login(){
+  const a=document.getElementById('lA').value,p=document.getElementById('lP').value,e=document.getElementById('lE');
+  if(!a){e.textContent='Odaberite savjetnika.';return;}
+  if(!p){e.textContent='Unesite lozinku.';return;}
+  if(C[a]!==p){e.textContent='Pogresna lozinka.';document.getElementById('lP').value='';return;}
+  adv=a;e.textContent='';
+  document.getElementById('L').style.display='none';
+  document.getElementById('A').classList.add('v');
+  document.getElementById('hN').textContent=a;
+  showEmpty();stats();
+  document.getElementById('Q').focus();
+}
+
+function logout(){
+  adv=null;hist=[];ai=null;
+  document.getElementById('A').classList.remove('v');
+  document.getElementById('L').style.display='flex';
+  document.getElementById('lP').value='';
+  document.getElementById('lE').textContent='';
+  document.getElementById('CQ').textContent='Jos nije postavljeno pitanje.';
+  document.getElementById('CQ').classList.add('e');
+  document.getElementById('HL').innerHTML='<div class="he">Jos nema pitanja.</div>';
+  showEmpty();
+}
+
+function showEmpty(){
+  document.getElementById('AA').innerHTML='<div class="es"><div class="ei"><svg width="18" height="18" fill="none" viewBox="0 0 24 24" stroke="currentColor" stroke-width="1.5"><path stroke-linecap="round" stroke-linejoin="round" d="M21 21l-5.197-5.197m0 0A7.5 7.5 0 105.196 15.803 7.5 7.5 0 0016.803 15.803z"/></svg></div><p class="et">Postavite pitanje</p><p class="ess">Unesite pitanje iz podrucja racunovodstva, poreza ili financijskog prava.</p></div>';
+}
+
+const q=document.getElementById('Q');
+q.addEventListener('input',()=>{q.style.height='auto';q.style.height=Math.min(q.scrollHeight,140)+'px';});
+q.addEventListener('keydown',e=>{if(e.key==='Enter'&&!e.shiftKey){e.preventDefault();send();}});
+
+const esc=s=>{if(!s)return'';return String(s).replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;').replace(/"/g,'&quot;').replace(/'/g,'&#39;');};
+const fmt=ms=>ms>=1000?(ms/1000).toFixed(1)+'s':ms+'ms';
+function pop(msg,d=2500){const t=document.getElementById('T');t.textContent=msg;t.classList.add('show');setTimeout(()=>t.classList.remove('show'),d);}
+const tip=txt=>`<span class="tw"><i class="ti">i</i><span class="tt">${esc(txt)}</span></span>`;
+// TODO (backend fix): Citation.source in rag/query.py currently receives the
+// full source_citation string from article_loader (e.g. the entire article title).
+// Fix: populate Citation.source with only the pub_label (e.g. "RRiF br. 11/2024")
+// and Citation.article_number with the section/article ref. Until then we truncate here.
+const MAX_CIT = 45;
+function fmtCit(c) {
+  let label = c.article_number ? (c.source||'') + ' cl. ' + c.article_number : (c.source||'');
+  const full = label;
+  if (label.length > MAX_CIT) label = label.slice(0, MAX_CIT).trimEnd() + '…';
+  return `<span class="ct" title="${esc(full)}">${esc(label)}</span>`;
+}
+
+// Render answer text: markdown bold/italic + numbered/lettered list detection
+function rnd(raw) {
+  const lines = raw.split('\n');
+  let out = '';
+  for (let i = 0; i < lines.length; i++) {
+    const line = lines[i];
+    const isNum  = /^\d+\.\s/.test(line);           // "1. ", "2. "
+    const isSub  = /^[a-z]\)\s/i.test(line);        // "a) ", "b) "
+    const isEmpty = line.trim() === '';
+    let content = esc(line)
+      .replace(/\*\*(.+?)\*\*/g,'<strong>$1</strong>')
+      .replace(/\*(.+?)\*/g,'<em>$1</em>');
+    if (isEmpty) {
+      out += '<div style="height:8px"></div>';
+    } else if (isNum) {
+      out += `<div style="margin:6px 0 2px;font-weight:500">${content}</div>`;
+    } else if (isSub) {
+      out += `<div style="margin:2px 0 2px 16px;color:var(--text)">${content}</div>`;
+    } else {
+      out += `<div style="margin:2px 0">${content}</div>`;
+    }
+  }
+  return out;
+}
+
+function showAt(i){
+  ai=i;
+  document.getElementById('CQ').textContent=hist[i].q;
+  document.getElementById('CQ').classList.remove('e');
+  document.getElementById('AA').innerHTML=hist[i].h;
+  renderHist();
+}
+
+function renderHist(){
+  const el=document.getElementById('HL');
+  if(!hist.length){el.innerHTML='<div class="he">Jos nema pitanja.</div>';return;}
+  el.innerHTML=hist.map((h,i)=>`<div class="hi ${i===ai?'act':''}" onclick="showAt(${i})"><span class="hn">${i+1}.</span><span class="ht">${esc(h.q)}</span></div>`).join('');
+}
+
+function mkHtml(d,ms,qid){
+  const stripe=d.referred_to_advisor?'sr':d.confidence==='high'?'sh':'sl';
+  let cit='';
+  if(d.citations&&d.citations.length){
+    const tags=d.citations.map(c=>fmtCit(c)).join('');
+    cit=`<div class="cr"><span class="cl2">Izvori</span>${tip('Citati su jedini verificirani izvori koje agent moze navesti. Temelje se iskljucivo na sluzbenim zakonima, NN i RRiF prirucnicima u bazi znanja.')}${tags}</div>`;
+  }
+  const ref=d.referred_to_advisor?`<div class="rr"><svg width="14" height="14" fill="none" viewBox="0 0 24 24" stroke="currentColor" stroke-width="2"><path stroke-linecap="round" stroke-linejoin="round" d="M12 9v3.75m-9.303 3.376c-.866 1.5.217 3.374 1.948 3.374h14.71c1.73 0 2.813-1.874 1.948-3.374L13.949 3.378c-.866-1.5-3.032-1.5-3.898 0L2.697 16.126zM12 15.75h.007v.008H12v-.008z"/></svg>Pitanje je preusmjereno na savjetnika.</div>`:'';
+  const ct=d.confidence==='high'?'Visoka sigurnost':'Niska sigurnost';
+  let meta=`<div class="mr"><span class="mp">${esc(ct)}&nbsp;${tip('Visoka sigurnost: agent je pronasao relevantne izvore. Niska sigurnost: pronađeni izvori nisu potpuno relevantni.')}</span><span class="mp">${fmt(ms)}&nbsp;${tip('Ukupno vrijeme od slanja pitanja do prikaza odgovora.')}</span>`;
+  if(d.temporal_basis)meta+=`<span class="mp">Vremenski okvir&nbsp;${tip(d.temporal_basis)}</span>`;
+  meta+=`</div>`;
+  const qe=esc(qid),ae=esc(adv);
+  return `<div class="ac"><div class="as ${stripe}"></div><div class="abo">${rnd(d.answer)}</div>${cit}${ref}${meta}<div class="fr" id="fb${qe}"><span class="fl">Ocjena odgovora${tip('Vasa ocjena se biljezi u bazi i koristi za mjerenje tocnosti prema kriterijima prihvacanja Faze 1. Detaljna ocjena (palac dolje) pomaze identificirati vrstu greske.')}</span><button class="tb" onclick="up('${qe}','${ae}',this)">&#128077;</button><button class="tb" onclick="dn('${qe}','${ae}',this)">&#128078;</button></div><div class="df" id="df${qe}"><div class="fg"><div><label>Ocjena tocnosti${tip('Tocno = odgovor je ispravan. Djelomicno = suština ispravna, detalj nedostaje. Netocno = pogresan sadrzaj.')}</label><select id="vd${qe}"><option value="">&#8212; Odaberite &#8212;</option><option value="incorrect">Netocno</option><option value="partially_correct">Djelomicno tocno</option><option value="correct">Tocno</option><option value="cannot_evaluate">Ne mogu ocijeniti</option></select></div><div><label>Poslali biste klijentu?${tip('Biste li ovaj odgovor proslijedili klijentu? Kljucna mjera poslovne upotrebljivosti.')}</label><select id="sc${qe}"><option value="">&#8212; Odaberite &#8212;</option><option value="yes">Da</option><option value="with_edits">Da, uz doradu</option><option value="no">Ne</option></select></div></div><div><label>Vrsta greske${tip('Odaberite primarni razlog netocnosti.')}</label><select id="fm${qe}"><option value="">&#8212; Opcionalno &#8212;</option><option value="wrong_category">Pogresna kategorija</option><option value="missing_source">Nedostaje izvor</option><option value="hallucination">Halucinacija</option><option value="wrong_article">Pogresan clanak</option><option value="outdated">Zastarjeli propis</option><option value="other">Ostalo</option></select></div><div><label>Komentar</label><textarea id="cm${qe}" rows="2" placeholder="Sto je bilo pogresno? (opcionalno)"></textarea></div><button class="bsf" onclick="sub('${qe}','${ae}')">Posalji povratnu informaciju</button></div></div>`;
+}
+
+async function send(){
+  const question=q.value.trim();
+  if(!question||!adv)return;
+  const sb=document.getElementById('sB');
+  sb.disabled=true;q.disabled=true;
+  document.getElementById('CQ').textContent=question;
+  document.getElementById('CQ').classList.remove('e');
+  document.getElementById('AA').innerHTML='<div class="lc2"><div class="dots"><span></span><span></span><span></span></div>Obradujem pitanje&hellip;</div>';
+  q.value='';q.style.height='auto';
+  const t0=Date.now();
+  try{
+    const r=await fetch('/api/query',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({question,advisor_id:adv})});
+    if(!r.ok){const e=await r.json().catch(()=>({}));throw new Error(e.detail||'HTTP '+r.status);}
+    const d=await r.json();
+    const h=mkHtml(d,Date.now()-t0,d.query_id);
+    hist.push({q:question,h});ai=hist.length-1;
+    document.getElementById('AA').innerHTML=h;
+    renderHist();stats();
+  }catch(e){
+    document.getElementById('AA').innerHTML=`<div class="ac"><div class="as sr"></div><div class="abo" style="color:var(--danger)">Greska: ${esc(e.message)}</div></div>`;
+  }finally{sb.disabled=false;q.disabled=false;q.focus();}
+}
+
+async function up(qid,adv2,btn){
+  const row=document.getElementById('fb'+qid);
+  row.querySelectorAll('.tb').forEach(b=>b.classList.remove('au','ad'));
+  btn.classList.add('au');
+  try{
+    await fetch('/api/feedback',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({query_id:qid,advisor_id:adv2,rating:1})});
+    row.innerHTML='<span class="fs">&#10003; Hvala na ocjeni</span>';
+    const i=hist.findIndex(h=>h.h.includes('fb'+qid));
+    if(i>=0)hist[i].h=document.getElementById('AA').innerHTML;
+    pop('Ocjena zabiljezena.');stats();
+  }catch{pop('Greska pri slanju.');}
+}
+
+function dn(qid,adv2,btn){
+  const row=document.getElementById('fb'+qid);
+  row.querySelectorAll('.tb').forEach(b=>b.classList.remove('au','ad'));
+  btn.classList.add('ad');
+  const df=document.getElementById('df'+qid);
+  df.classList.add('o');
+  df.scrollIntoView({behavior:'smooth',block:'nearest'});
+}
+
+async function sub(qid,adv2){
+  const btn=event.target;btn.disabled=true;
+  const body={query_id:qid,advisor_id:adv2,rating:-1,accuracy_verdict:document.getElementById('vd'+qid).value||null,would_send_to_client:document.getElementById('sc'+qid).value||null,failure_mode:document.getElementById('fm'+qid).value||null,comment:document.getElementById('cm'+qid).value.trim()||null};
+  try{
+    const r=await fetch('/api/feedback',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(body)});
+    if(!r.ok)throw new Error();
+    document.getElementById('df'+qid).classList.remove('o');
+    document.getElementById('fb'+qid).innerHTML='<span class="fs">&#10003; Povratna informacija zabiljezena</span>';
+    const i=hist.findIndex(h=>h.h.includes('fb'+qid));
+    if(i>=0)hist[i].h=document.getElementById('AA').innerHTML;
+    pop('Povratna informacija poslana.');stats();
+  }catch{btn.disabled=false;pop('Greska. Pokusajte ponovo.');}
+}
+
+async function stats(){
+  try{
+    const r=await fetch('/api/admin/stats');if(!r.ok)return;
+    const d=await r.json();
+    document.getElementById('sQ').textContent=d.total_queries??'&#8212;';
+    document.getElementById('sF').textContent=d.total_feedback??'&#8212;';
+    if(d.accuracy_strict_pct!=null){
+      document.getElementById('aB').style.width=(d.accuracy_acceptable_pct||0)+'%';
+      document.getElementById('aS').textContent='stroga: '+d.accuracy_strict_pct+'%';
+      document.getElementById('aA').textContent='prihv.: '+d.accuracy_acceptable_pct+'%';
+    }
+    const vm={correct:{l:'Tocno',c:'vc'},partially_correct:{l:'Djelomicno tocno',c:'vp'},incorrect:{l:'Netocno',c:'vw'},cannot_evaluate:{l:'Nije moguce ocijeniti',c:'vu'}};
+    const vc=d.verdict_counts||{};
+    document.getElementById('VL').innerHTML=Object.keys(vc).length?Object.entries(vc).map(([k,n])=>{const m=vm[k]||{l:k,c:'vu'};return`<div class="vi"><div class="vd ${m.c}"></div><span class="vn">${m.l}</span><span class="vm">${n}</span></div>`;}).join(''):'<div style="font-size:12px;color:var(--muted)">Jos nema ocjena.</div>';
+    const cats=d.queries_by_category||{};
+    document.getElementById('KL').innerHTML=Object.keys(cats).length?Object.entries(cats).sort((a,b)=>b[1]-a[1]).slice(0,6).map(([k,n])=>`<div class="ki"><span class="kn">${esc(k||'ostalo')}</span><span class="km">${n}</span></div>`).join(''):'<div style="font-size:12px;color:var(--muted)">Jos nema upita.</div>';
+  }catch{}
+}
+</script>
+</body>
+</html>
