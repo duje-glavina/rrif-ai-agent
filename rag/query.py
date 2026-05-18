@@ -42,6 +42,8 @@ CANDIDATES              = 20
 TOP_K                   = 5
 RRF_K                   = 60
 MIN_FALLBACK_CANDIDATES = 5   # widen filter if fewer candidates than this
+RERANK_THRESHOLD = 0.75
+
 
 
 # ── Response data classes ─────────────────────────────────────────────────────
@@ -208,12 +210,22 @@ def _rrf_merge(sem_rows: dict, fts_rows: dict) -> list[tuple]:
 
 
 
+
+def _top_rerank_score(question: str, candidates: list[tuple]) -> float:
+    """Check relevance quality of candidates by reranking top 5."""
+    if not candidates:
+        return 0.0
+    rerank_input = [(row[0], row[1]) for row in candidates[:5]]
+    reranked = rerank(question, rerank_input, k=1)
+    return reranked[0][2] if reranked else 0.0
+
+
 def _retrieve(question: str, clf: ClassifierResult) -> list[tuple]:
     """Hybrid retrieval with three-level fallback.
 
-    1. tight  — domain + subdomains
-    2. medium — domain only        (if tight < MIN_FALLBACK_CANDIDATES)
-    3. wide   — no filter          (if medium < MIN_FALLBACK_CANDIDATES)
+    1. tight  — domain + subdomains  (if enough candidates AND quality ok)
+    2. medium — domain only          (if tight fails count or quality check)
+    3. wide   — no filter            (if medium fails count or quality check)
     """
     qvec = embed_query(question)
     filters = clf.to_retrieval_filter()
@@ -225,7 +237,7 @@ def _retrieve(question: str, clf: ClassifierResult) -> list[tuple]:
     sem_rows, fts_rows = _semantic_fts_search(question, qvec, where_sql, params, CANDIDATES)
     candidates = _rrf_merge(sem_rows, fts_rows)
 
-    if len(candidates) >= MIN_FALLBACK_CANDIDATES:
+    if len(candidates) >= MIN_FALLBACK_CANDIDATES and _top_rerank_score(question, candidates) >= RERANK_THRESHOLD:
         log.debug("_retrieve tight: %d (domain=%s subdomains=%s)",
                   len(candidates), filters["domain"], filters["subdomains"])
         return candidates
@@ -239,7 +251,7 @@ def _retrieve(question: str, clf: ClassifierResult) -> list[tuple]:
     sem2, fts2 = _semantic_fts_search(question, qvec, where_sql2, params2, CANDIDATES)
     candidates2 = _rrf_merge(sem2, fts2)
 
-    if len(candidates2) >= MIN_FALLBACK_CANDIDATES:
+    if len(candidates2) >= MIN_FALLBACK_CANDIDATES and _top_rerank_score(question, candidates2) >= RERANK_THRESHOLD:
         return candidates2
 
     # Attempt 3: unfiltered
@@ -248,7 +260,6 @@ def _retrieve(question: str, clf: ClassifierResult) -> list[tuple]:
     where_sql3 = _build_where(None, None, sql_time, params3)
     sem3, fts3 = _semantic_fts_search(question, qvec, where_sql3, params3, CANDIDATES)
     return _rrf_merge(sem3, fts3)
-
 
 # ── Generation ────────────────────────────────────────────────────────────────
 
