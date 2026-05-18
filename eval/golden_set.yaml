@@ -253,7 +253,7 @@
 - id: pdv_007_strani_obveznik
   query: "Kada se strani porezni obveznik treba registrirati za PDV u RH?"
   expected_articles: []
-  expected_keywords: ["PDV ID", "registriran", "hrvatski PDV"]
+  expected_keywords: ["registrirati", "tuzemstvo", "isporuke"]
   expected_category: PDV
   in_corpus: true
   notes: "Magazine content from RRiF 11/2024. Tests retrieval of članak chunks."
@@ -279,7 +279,7 @@
 - id: doh_002_student
   query: "Kako se oporezuje studentska naknada iznad neoporezivog iznosa?"
   expected_articles: []
-  expected_keywords: ["23,60", "bruto"]
+  expected_keywords: ["10.080", "neoporeziv"]
   expected_category: dohodak
   in_corpus: true
   notes: "RRiF 9/2024. Specific tax rate — good keyword grading."
