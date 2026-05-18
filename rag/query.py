@@ -204,7 +204,8 @@ def _rrf_merge(sem_rows: dict, fts_rows: dict) -> list[tuple]:
             row[8] if len(row) > 8 else None,
         ))
     scored.sort(reverse=True)
-    return [(r[1], r[2], r[3], r[4], r[5], r[6], r[7], r[8], r[9]) for r in scored
+    return [(r[1], r[2], r[3], r[4], r[5], r[6], r[7], r[8], r[9]) for r in scored[:CANDIDATES]]
+
 
 
 def _retrieve(question: str, clf: ClassifierResult) -> list[tuple]:
