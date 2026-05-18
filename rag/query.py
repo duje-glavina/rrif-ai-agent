@@ -118,7 +118,7 @@ def _build_where(
         params.append(domain)
 
     if sql_time:
-        clauses.append(f"(source_type != 'članak' AND ({sql_time}) OR source_type = 'članak')"
+        clauses.append(f"(source_type != 'članak' AND ({sql_time}) OR source_type = 'članak')")
 
     return " AND ".join(clauses)
 
@@ -147,7 +147,7 @@ def _semantic_fts_search(
                         f"""
                         SELECT id, chunk_text, source, article_number,
                                valid_from::text, valid_to::text,
-                               source_type, extra_metadata
+                               source_type, extra_metadata, status
                         FROM chunks
                         WHERE {where_sql}
                           AND to_tsvector('simple', chunk_text)
@@ -169,7 +169,7 @@ def _semantic_fts_search(
                 f"""
                 SELECT id, chunk_text, source, article_number,
                        valid_from::text, valid_to::text,
-                       source_type, extra_metadata
+                       source_type, extra_metadata, status
                 FROM chunks
                 WHERE {where_sql}
                 ORDER BY embedding <=> %s
@@ -201,10 +201,10 @@ def _rrf_merge(sem_rows: dict, fts_rows: dict) -> list[tuple]:
             row[0], row[1], row[2], row[3], row[4], row[5],
             row[6] if len(row) > 6 else None,
             row[7] if len(row) > 7 else None,
+            row[8] if len(row) > 8 else None,
         ))
-
     scored.sort(reverse=True)
-    return [(r[1], r[2], r[3], r[4], r[5], r[6],r[7], r[8]) for r in scored[:CANDIDATES]]
+    return [(r[1], r[2], r[3], r[4], r[5], r[6], r[7], r[8], r[9]) for r in scored
 
 
 def _retrieve(question: str, clf: ClassifierResult) -> list[tuple]:
@@ -267,7 +267,7 @@ def _generate(question: str, top_chunks: list[tuple], clf: ClassifierResult) -> 
             "article_number": row[3] if len(row) > 3 else None,
             "valid_from":     row[4] if len(row) > 4 else None,
             "valid_to":       row[5] if len(row) > 5 else None,
-            "status":         "vazeci" if not (row[5] if len(row) > 5 else None) else "nevazeci",
+            "status": row[8] if len(row) > 8 else "nevazeci",
             "source_type":    row[6] if len(row) > 6 else None,
             "pub_label":      em.get("pub_label", ""),
             "title":          em.get("title", ""),
