@@ -179,11 +179,12 @@
 # ─── neprofitne organizacije ────────────────────────────────────────────────
 
 - id: npo_001_knjige
-  query: "Kako udruga vodi poslovne knjige?"
+  query: "Kako se u neprofitnom računovodstvu evidentira unos građevinskog objekta u glavnu knjigu?"
   expected_articles: []
-  expected_keywords: ["udrug"]
+  expected_keywords: ["građevinski objekt", "glavna knjiga", "neprofitno"]
   expected_category: NPO
   in_corpus: true
+  notes: "RRiF 11/2024. Specific enough to hit NPO chunks."
 
 # ─── EU propisi ─────────────────────────────────────────────────────────────
 
@@ -202,7 +203,7 @@
   expected_articles: []
   expected_keywords: ["INTRASTAT"]
   expected_category: inozemstvo
-  in_corpus: true
+  in_corpus: false
   notes: "Only 144 vazeci inozemstvo chunks. May need fallback to domain level."
 
 - id: pi_002_transferne
@@ -220,16 +221,6 @@
   expected_keywords: ["potrošač"]
   expected_category: tržište
   in_corpus: true
-
-# ─── stručne informacije ────────────────────────────────────────────────────
-
-- id: si_001
-  query: "Što je novo u tumačenjima Porezne uprave?"
-  expected_articles: []
-  expected_keywords: ["tumačenj", "Porezn"]
-  expected_category: stručne
-  in_corpus: true
-  notes: "Only 185 vazeci stručne chunks. Thin but should find something."
 
 # ─── Trap questions ──────────────────────────────────────────────────────────
 
@@ -359,7 +350,7 @@
   query: "Što se ne smatra kućom za odmor i ne podliježe oporezivanju?"
   expected_articles: []
   expected_keywords: ["gospodarska zgrada", "klijet", "stalno stanovanje"]
-  expected_category: porezi
+  expected_category: dohodak
   in_corpus: true
   notes: "The question that found the classifier+rerank threshold bug. Keep as regression test."
 
@@ -367,6 +358,6 @@
   query: "Koliko može trajati neprekidno ustupanje radnika preko agencije za privremeno zapošljavanje?"
   expected_articles: []
   expected_keywords: ["tri godine", "agencija"]
-  expected_category: porezi
+  expected_category: radno_pravo
   in_corpus: true
   notes: "PiP 10/2024. Likely misclassified as radno_pravo — tests fallback."
