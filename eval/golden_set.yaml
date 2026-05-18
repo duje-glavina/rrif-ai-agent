@@ -256,3 +256,117 @@
   expected_category: ostalo
   in_corpus: false
   notes: "GDPR content gap. Agent should admit gap rather than fabricate."
+
+  # ─── PDV magazine content ────────────────────────────────────────────────────
+
+- id: pdv_007_strani_obveznik
+  query: "Kada se strani porezni obveznik treba registrirati za PDV u RH?"
+  expected_articles: []
+  expected_keywords: ["PDV ID", "registriran", "hrvatski PDV"]
+  expected_category: PDV
+  in_corpus: true
+  notes: "Magazine content from RRiF 11/2024. Tests retrieval of članak chunks."
+
+- id: pdv_008_mali_obveznik_2025
+  query: "Koji je novi prag za ulazak u sustav PDV-a od 2025. godine?"
+  expected_articles: []
+  expected_keywords: ["prag", "2025", "mali porezni obveznik"]
+  expected_category: PDV
+  in_corpus: true
+  notes: "RRiF 12/2024. Tests recency — vazeci 2024 article."
+
+# ─── dohodak magazine content ────────────────────────────────────────────────
+
+- id: doh_001_neop_primici
+  query: "Koja je neoporeziva svota nagrade za športska ostvarenja?"
+  expected_articles: []
+  expected_keywords: ["2.800", "godišnje"]
+  expected_category: dohodak
+  in_corpus: true
+  notes: "RRiF 1/2024. Specific amount — easy to verify."
+
+- id: doh_002_student
+  query: "Kako se oporezuje studentska naknada iznad neoporezivog iznosa?"
+  expected_articles: []
+  expected_keywords: ["23,60", "bruto"]
+  expected_category: dohodak
+  in_corpus: true
+  notes: "RRiF 9/2024. Specific tax rate — good keyword grading."
+
+- id: doh_003_nerezident
+  query: "Može li nerezident ostvariti uvećanje osobnog odbitka u RH?"
+  expected_articles: []
+  expected_keywords: ["90 %", "ZPP-DOH", "nerezident"]
+  expected_category: dohodak
+  in_corpus: true
+  notes: "RRiF 2/2024. Tests nuanced dohodak retrieval."
+
+# ─── dobit magazine content ──────────────────────────────────────────────────
+
+- id: dob_001_reprezentacija
+  query: "Koliko posto troškova reprezentacije je porezno priznato?"
+  expected_articles: []
+  expected_keywords: ["50 %", "reprezentacija"]
+  expected_category: dobit
+  in_corpus: true
+  notes: "RRiF 12/2024. Classic question with specific number."
+
+- id: dob_002_prag_dobit
+  query: "Koji godišnji primitak obvezuje obrtnika da postane obveznik poreza na dobitak?"
+  expected_articles: []
+  expected_keywords: ["1.000.000", "€"]
+  expected_category: dobit
+  in_corpus: true
+  notes: "RRiF 12/2024. Threshold question — good for keyword grading."
+
+- id: dob_003_manjak
+  query: "Što je porezno priznat manjak s motrišta poreza na dobitak?"
+  expected_articles: []
+  expected_keywords: ["porezno priznat", "manjak", "trošak"]
+  expected_category: dobit
+  in_corpus: true
+  notes: "RRiF 12/2024."
+
+# ─── plaće magazine content ──────────────────────────────────────────────────
+
+- id: place_003_min_placa
+  query: "Kolika je minimalna plaća u Hrvatskoj za 2024. godinu?"
+  expected_articles: []
+  expected_keywords: ["840", "€"]
+  expected_category: plaće
+  in_corpus: true
+  notes: "RRiF 2/2024 and 10/2024. Multiple sources."
+
+- id: place_004_clan_uprave
+  query: "Koja je minimalna mjesečna osnovica za obračun doprinosa za zaposlenog člana uprave u 2024.?"
+  expected_articles: []
+  expected_keywords: ["1.014", "€"]
+  expected_category: plaće
+  in_corpus: true
+  notes: "RRiF 10/2024. Specific amount."
+
+- id: place_005_stranac_mio
+  query: "Moraju li strani radnici mlađi od 40 godina plaćati doprinos za MIO II. stup?"
+  expected_articles: []
+  expected_keywords: ["40 godina", "MIO II", "obvezno"]
+  expected_category: plaće
+  in_corpus: true
+  notes: "RRiF 10/2024. Tests retrieval of stranac/MIO content."
+
+# ─── porezi catch-all (misclassification stress tests) ───────────────────────
+
+- id: porezi_004_kuca_odmor
+  query: "Što se ne smatra kućom za odmor i ne podliježe oporezivanju?"
+  expected_articles: []
+  expected_keywords: ["gospodarska zgrada", "klijet", "stalno stanovanje"]
+  expected_category: porezi
+  in_corpus: true
+  notes: "The question that found the classifier+rerank threshold bug. Keep as regression test."
+
+- id: porezi_005_agencija_trajanje
+  query: "Koliko može trajati neprekidno ustupanje radnika preko agencije za privremeno zapošljavanje?"
+  expected_articles: []
+  expected_keywords: ["tri godine", "agencija"]
+  expected_category: porezi
+  in_corpus: true
+  notes: "PiP 10/2024. Likely misclassified as radno_pravo — tests fallback."
