@@ -118,7 +118,7 @@ def _build_where(
         params.append(domain)
 
     if sql_time:
-        clauses.append(f"({sql_time})")
+        clauses.append(f"(source_type != 'članak' AND ({sql_time}) OR source_type = 'članak')"
 
     return " AND ".join(clauses)
 
