@@ -397,7 +397,7 @@ def ask(
     result.rewritten_query = rewritten_query
     result.rewrite_changed = rewrite_changed
     result.retrieved_chunk_ids = [str(chunk_id) for chunk_id, _, _ in reranked]
-    result.retrieved_scores = [float(score) for _, score, _ in reranked]
+    result.retrieved_scores = [float(score) for _, _, score in reranked]
 
     if verbose:
         print(f"[generator] confidence={result.confidence} | "
