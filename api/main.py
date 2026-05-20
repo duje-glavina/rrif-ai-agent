@@ -77,8 +77,9 @@ def query_endpoint(req: QueryRequest, db=Depends(get_db)):
                 referred_to_advisor, model_used,
                 tokens_in, tokens_out, latency_ms,
                 estimated_cost_usd, error_flag,
+                retrieved_chunk_ids, retrieved_scores,
                 trace_json
-            ) VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s)
+            ) VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s)
         """, (
             query_id,
             req.advisor_id,
@@ -94,6 +95,8 @@ def query_endpoint(req: QueryRequest, db=Depends(get_db)):
             result.latency_ms,
             estimated_cost,
             False,
+            [str(c) for c in result.retrieved_chunk_ids] or None,
+            result.retrieved_scores or None,
             Jsonb(result_dict["meta"]),
         ))
     db.commit()

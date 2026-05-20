@@ -72,6 +72,8 @@ class QueryResponse:
     original_query: str = ""
     rewritten_query: str = ""
     rewrite_changed: bool = False
+    retrieved_chunk_ids: list[str] = field(default_factory=list)
+    retrieved_scores: list[float] = field(default_factory=list)
     def to_dict(self) -> dict:
         return {
             "answer": self.answer,
@@ -394,6 +396,8 @@ def ask(
     result.original_query = original_query
     result.rewritten_query = rewritten_query
     result.rewrite_changed = rewrite_changed
+    result.retrieved_chunk_ids = [str(chunk_id) for chunk_id, _, _ in reranked]
+    result.retrieved_scores = [float(score) for _, score, _ in reranked]
 
     if verbose:
         print(f"[generator] confidence={result.confidence} | "
