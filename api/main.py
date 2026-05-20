@@ -65,6 +65,9 @@ def query_endpoint(req: QueryRequest, db=Depends(get_db)):
     query_id = str(uuid.uuid4())
     result_dict = result.to_dict()
 
+    # Estimate cost (claude-sonnet-4-6: $3/MTok in, $15/MTok out)
+    estimated_cost = (result.tokens_in * 3 + result.tokens_out * 15) / 1_000_000
+
     with db.cursor() as cur:
         cur.execute("""
             INSERT INTO queries (
@@ -73,8 +76,9 @@ def query_endpoint(req: QueryRequest, db=Depends(get_db)):
                 answer_text, citations, confidence,
                 referred_to_advisor, model_used,
                 tokens_in, tokens_out, latency_ms,
+                estimated_cost_usd, error_flag,
                 trace_json
-            ) VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s)
+            ) VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s)
         """, (
             query_id,
             req.advisor_id,
@@ -88,7 +92,9 @@ def query_endpoint(req: QueryRequest, db=Depends(get_db)):
             result.tokens_in,
             result.tokens_out,
             result.latency_ms,
-            Jsonb(result_dict["meta"]),   # classifier + timing info
+            estimated_cost,
+            False,
+            Jsonb(result_dict["meta"]),
         ))
     db.commit()
 
@@ -175,6 +181,6 @@ def admin_stats(db=Depends(get_db)):
 
 # ── Static frontend (mount last so API routes take priority) ──────────────────
 
-frontend_dir = Path(__file__).parent.parent / "frontend"
+frontend_dir = Path(__file__).parent.parent / "frontend" / "dist"
 if frontend_dir.exists():
     app.mount("/", StaticFiles(directory=str(frontend_dir), html=True), name="frontend")
