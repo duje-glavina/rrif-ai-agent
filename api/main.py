@@ -3,14 +3,18 @@ from __future__ import annotations
 
 import os
 import uuid
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
+import bcrypt
 import psycopg
 from psycopg.types.json import Jsonb
 from dotenv import load_dotenv
 from fastapi import FastAPI, HTTPException, Depends
 from fastapi.middleware.cors import CORSMiddleware
+from fastapi.security import HTTPBearer, HTTPAuthorizationCredentials
 from fastapi.staticfiles import StaticFiles
+from jose import JWTError, jwt
 from pydantic import BaseModel
 
 import sys
@@ -28,6 +32,29 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
+# ── JWT config ────────────────────────────────────────────────────────────────
+
+JWT_SECRET = os.environ["JWT_SECRET"]
+JWT_ALGORITHM = "HS256"
+JWT_EXPIRY_HOURS = 12
+
+security = HTTPBearer()
+
+def create_token(username: str, name: str) -> str:
+    payload = {
+        "sub": username,
+        "name": name,
+        "exp": datetime.now(timezone.utc) + timedelta(hours=JWT_EXPIRY_HOURS),
+    }
+    return jwt.encode(payload, JWT_SECRET, algorithm=JWT_ALGORITHM)
+
+def verify_token(credentials: HTTPAuthorizationCredentials = Depends(security)) -> dict:
+    try:
+        payload = jwt.decode(credentials.credentials, JWT_SECRET, algorithms=[JWT_ALGORITHM])
+        return {"username": payload["sub"], "name": payload["name"]}
+    except JWTError:
+        raise HTTPException(status_code=401, detail="Invalid or expired token")
+
 # ── DB ────────────────────────────────────────────────────────────────────────
 
 def get_db():
@@ -39,24 +66,47 @@ def get_db():
 
 # ── Models ────────────────────────────────────────────────────────────────────
 
+class LoginRequest(BaseModel):
+    username: str
+    password: str
+
 class QueryRequest(BaseModel):
     question: str
-    advisor_id: str
 
 class FeedbackRequest(BaseModel):
     query_id: str
-    advisor_id: str
-    rating: int                          # 1 = thumbs up, -1 = thumbs down
-    accuracy_verdict: str | None = None  # correct | partially_correct | incorrect | cannot_evaluate
-    would_send_to_client: str | None = None  # yes | no | with_edits
-    failure_mode: str | None = None      # wrong_category | missing_source | hallucination | wrong_article | outdated | other
+    rating: int
+    accuracy_verdict: str | None = None
+    would_send_to_client: str | None = None
+    failure_mode: str | None = None
     comment: str | None = None
     suggested_answer: str | None = None
+
+# ── Auth endpoint ─────────────────────────────────────────────────────────────
+
+@app.post("/api/login")
+def login_endpoint(req: LoginRequest, db=Depends(get_db)):
+    with db.cursor() as cur:
+        cur.execute(
+            "SELECT password_hash, name FROM users WHERE username = %s AND is_active = TRUE",
+            (req.username.strip(),)
+        )
+        row = cur.fetchone()
+
+    if not row:
+        raise HTTPException(status_code=401, detail="Pogrešno korisničko ime ili lozinka.")
+
+    password_hash, name = row
+    if not bcrypt.checkpw(req.password.encode(), password_hash.encode()):
+        raise HTTPException(status_code=401, detail="Pogrešno korisničko ime ili lozinka.")
+
+    token = create_token(req.username.strip(), name)
+    return {"token": token, "username": req.username.strip(), "name": name}
 
 # ── Endpoints ─────────────────────────────────────────────────────────────────
 
 @app.post("/api/query")
-def query_endpoint(req: QueryRequest, db=Depends(get_db)):
+def query_endpoint(req: QueryRequest, db=Depends(get_db), user=Depends(verify_token)):
     try:
         result = ask(req.question)
     except Exception as e:
@@ -82,7 +132,7 @@ def query_endpoint(req: QueryRequest, db=Depends(get_db)):
             ) VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s)
         """, (
             query_id,
-            req.advisor_id,
+            user["username"],
             req.question,
             result.classifier.category,
             result.answer,
@@ -112,8 +162,7 @@ def query_endpoint(req: QueryRequest, db=Depends(get_db)):
 
 
 @app.post("/api/feedback")
-def feedback_endpoint(req: FeedbackRequest, db=Depends(get_db)):
-    # Verify the query_id exists
+def feedback_endpoint(req: FeedbackRequest, db=Depends(get_db), user=Depends(verify_token)):
     with db.cursor() as cur:
         cur.execute("SELECT 1 FROM queries WHERE query_id = %s", (req.query_id,))
         if not cur.fetchone():
@@ -126,7 +175,7 @@ def feedback_endpoint(req: FeedbackRequest, db=Depends(get_db)):
                 failure_mode, comment, suggested_answer
             ) VALUES (%s,%s,%s,%s,%s,%s,%s,%s)
         """, (
-            req.query_id, req.advisor_id, req.rating,
+            req.query_id, user["username"], req.rating,
             req.accuracy_verdict, req.would_send_to_client,
             req.failure_mode, req.comment, req.suggested_answer,
         ))
@@ -135,7 +184,7 @@ def feedback_endpoint(req: FeedbackRequest, db=Depends(get_db)):
 
 
 @app.get("/api/admin/stats")
-def admin_stats(db=Depends(get_db)):
+def admin_stats(db=Depends(get_db), user=Depends(verify_token)):
     with db.cursor() as cur:
         cur.execute("SELECT COUNT(*) FROM queries")
         total_queries = cur.fetchone()[0]
@@ -176,8 +225,8 @@ def admin_stats(db=Depends(get_db)):
         "total_queries": total_queries,
         "total_feedback": total_feedback,
         "verdict_counts": verdict_counts,
-        "accuracy_strict_pct": accuracy_pct,      # % rated 'correct'
-        "accuracy_acceptable_pct": acceptable_pct, # % rated 'correct' or 'partially_correct'
+        "accuracy_strict_pct": accuracy_pct,
+        "accuracy_acceptable_pct": acceptable_pct,
         "queries_by_category": by_category,
     }
 
