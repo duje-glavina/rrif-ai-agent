@@ -37,6 +37,12 @@ import psycopg
 from dotenv import load_dotenv
 from tqdm import tqdm
 
+import re
+_UUID_RE = re.compile(
+    r'^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$',
+    re.IGNORECASE,
+)
+
 sys.path.insert(0, str(Path(__file__).parent.parent))
 from rag.taxonomy import (
     LEGACY_CATEGORY_MAP,
@@ -161,6 +167,11 @@ def _classify_batch(
         # Validate each result
         validated = []
         for r in results:
+            cid = r.get("id", "")
+            # Skip results where Haiku hallucinated a malformed UUID
+            if not _UUID_RE.match(cid):
+                log.warning("Invalid UUID %r from LLM, skipping", cid)
+                continue
             subdomain = r.get("subdomain", "ostalo")
             domain    = r.get("domain", "ostalo")
             # Correct domain if it doesn't match subdomain
@@ -170,7 +181,7 @@ def _classify_batch(
             if subdomain not in VALID_SUBDOMAINS:
                 log.warning("Unknown subdomain %r, falling back to ostalo", subdomain)
                 subdomain, domain = "ostalo", "ostalo"
-            validated.append({"id": r["id"], "domain": domain, "subdomain": subdomain})
+            validated.append({"id": cid, "domain": domain, "subdomain": subdomain})
         return validated
     except Exception as e:
         log.warning("Batch failed: %s", e)
