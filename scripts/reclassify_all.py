@@ -149,7 +149,7 @@ def _classify_batch(
     try:
         response = client.messages.create(
             model=HAIKU_MODEL,
-            max_tokens=1024,
+            max_tokens=2048,
             system=SYSTEM_PROMPT,
             messages=[{"role": "user", "content": user_msg}],
         )
