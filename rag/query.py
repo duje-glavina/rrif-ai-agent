@@ -11,6 +11,18 @@ Retrieval uses a three-level fallback:
   tight  → domain + subdomain(s)
   medium → domain only
   wide   → no filter (last resort)
+
+Two experiment hooks, both off by default:
+
+  RETRIEVAL_MODE=tight|domain|wide
+      Skip straight to a given filter level. 'wide' is the category-filter
+      ablation: retrieve without domain/subdomain narrowing and let the
+      reranker do the discriminating.
+
+  ask(..., skip_generation=True)
+      Stop after reranking. No Sonnet call, so retrieval experiments are
+      genuinely free and fast. `retrieved_meta` is still populated, which is
+      what the eval harness grades retrieval on.
 """
 from __future__ import annotations
 
@@ -44,6 +56,15 @@ RRF_K                   = 60
 MIN_FALLBACK_CANDIDATES = 5   # widen filter if fewer candidates than this
 RERANK_THRESHOLD = 0.75
 
+# Experiment hook: which filter level to start (and stay) at.
+#   tight  — domain + subdomains, with the normal fallback chain (default)
+#   domain — skip the subdomain narrowing, start at domain-only
+#   wide   — no domain filter at all; the ablation
+RETRIEVAL_MODE = os.getenv("RETRIEVAL_MODE", "tight").lower()
+if RETRIEVAL_MODE not in {"tight", "domain", "wide"}:
+    raise ValueError(
+        f"RETRIEVAL_MODE must be tight|domain|wide, got {RETRIEVAL_MODE!r}"
+    )
 
 
 # ── Response data classes ─────────────────────────────────────────────────────
@@ -74,6 +95,14 @@ class QueryResponse:
     rewrite_changed: bool = False
     retrieved_chunk_ids: list[str] = field(default_factory=list)
     retrieved_scores: list[float] = field(default_factory=list)
+    # What retrieval actually returned, before the generator had any say.
+    # One dict per reranked chunk: chunk_id, source, article_number,
+    # source_type, status, rerank_score. Grade retrieval on THIS, not on
+    # citations — citations reflect what the LLM chose to cite, which is a
+    # different (and later) thing.
+    retrieved_meta: list[dict] = field(default_factory=list)
+    generation_skipped: bool = False
+
     def to_dict(self) -> dict:
         return {
             "answer": self.answer,
@@ -101,6 +130,8 @@ class QueryResponse:
                 "original_query": self.original_query,
                 "rewritten_query": self.rewritten_query,
                 "rewrite_changed": self.rewrite_changed,
+                "retrieval_mode": RETRIEVAL_MODE,
+                "generation_skipped": self.generation_skipped,
             },
         }
 
@@ -207,7 +238,7 @@ def _rrf_merge(sem_rows: dict, fts_rows: dict) -> list[tuple]:
             row[7] if len(row) > 7 else None,
             row[8] if len(row) > 8 else None,
         ))
-    scored.sort(reverse=True)
+    scored.sort(key=lambda t: t[0], reverse=True)
     return [(r[1], r[2], r[3], r[4], r[5], r[6], r[7], r[8], r[9]) for r in scored[:CANDIDATES]]
 
 
@@ -228,25 +259,38 @@ def _retrieve(question: str, clf: ClassifierResult) -> list[tuple]:
     1. tight  — domain + subdomains  (if enough candidates AND quality ok)
     2. medium — domain only          (if tight fails count or quality check)
     3. wide   — no filter            (if medium fails count or quality check)
+
+    RETRIEVAL_MODE short-circuits this: 'wide' goes straight to the
+    unfiltered search (the ablation), 'domain' starts at level 2.
     """
     qvec = embed_query(question)
     filters = clf.to_retrieval_filter()
     sql_time = filters["sql_time_filter"]
 
-    # Attempt 1: tight
-    params: list = []
-    where_sql = _build_where(filters["domain"], filters["subdomains"], sql_time, params)
-    sem_rows, fts_rows = _semantic_fts_search(question, qvec, where_sql, params, CANDIDATES)
-    candidates = _rrf_merge(sem_rows, fts_rows)
-
-    if len(candidates) >= MIN_FALLBACK_CANDIDATES and _top_rerank_score(question, candidates) >= RERANK_THRESHOLD:
-        log.debug("_retrieve tight: %d (domain=%s subdomains=%s)",
-                  len(candidates), filters["domain"], filters["subdomains"])
+    # Ablation: no domain/subdomain filter at all.
+    if RETRIEVAL_MODE == "wide":
+        params: list = []
+        where_sql = _build_where(None, None, sql_time, params)
+        sem, fts = _semantic_fts_search(question, qvec, where_sql, params, CANDIDATES)
+        candidates = _rrf_merge(sem, fts)
+        log.debug("_retrieve wide (ablation): %d candidates", len(candidates))
         return candidates
 
+    # Attempt 1: tight
+    if RETRIEVAL_MODE == "tight":
+        params = []
+        where_sql = _build_where(filters["domain"], filters["subdomains"], sql_time, params)
+        sem_rows, fts_rows = _semantic_fts_search(question, qvec, where_sql, params, CANDIDATES)
+        candidates = _rrf_merge(sem_rows, fts_rows)
+
+        if len(candidates) >= MIN_FALLBACK_CANDIDATES and _top_rerank_score(question, candidates) >= RERANK_THRESHOLD:
+            log.debug("_retrieve tight: %d (domain=%s subdomains=%s)",
+                      len(candidates), filters["domain"], filters["subdomains"])
+            return candidates
+        log.info("_retrieve → domain-only fallback (tight=%d, domain=%s)",
+                 len(candidates), filters["domain"])
+
     # Attempt 2: domain-only
-    log.info("_retrieve → domain-only fallback (tight=%d, domain=%s)",
-             len(candidates), filters["domain"])
     fb = clf.fallback_filter()
     params2: list = []
     where_sql2 = _build_where(fb["domain"], None, sql_time, params2)
@@ -295,7 +339,7 @@ def _generate(question: str, top_chunks: list[tuple], clf: ClassifierResult) -> 
 
     citations = [
         Citation(
-            source=c.get("law_name") or "",
+            source=c.get("law_name") or c.get("source") or "",
             article_number=c.get("article_number"),
             valid_from=None,
             valid_to=None,
@@ -319,18 +363,44 @@ def _generate(question: str, top_chunks: list[tuple], clf: ClassifierResult) -> 
     )
 
 
+def _meta_from_chunks(top_chunks: list[tuple], reranked: list[tuple]) -> list[dict]:
+    """Flatten the reranked chunks into a gradeable retrieval record.
+
+    This is deliberately independent of generation: it says what retrieval
+    put in front of the model, in rank order, with the real cross-encoder
+    score attached.
+    """
+    scores = {str(cid): float(s) for cid, _, s in reranked}
+    meta = []
+    for row in top_chunks:
+        cid = str(row[0])
+        meta.append({
+            "chunk_id":       cid,
+            "source":         row[2] if len(row) > 2 else None,
+            "article_number": row[3] if len(row) > 3 else None,
+            "source_type":    row[6] if len(row) > 6 else None,
+            "status":         row[8] if len(row) > 8 else None,
+            "rerank_score":   scores.get(cid),
+        })
+    return meta
+
+
 # ── Public API ────────────────────────────────────────────────────────────────
 
 def ask(
     question: str,
     verbose: bool = False,
     enable_rewrite: bool = False,
+    skip_generation: bool = False,
 ) -> QueryResponse:
     """Full RAG pipeline: classify → retrieve → rerank → generate.
 
-    enable_rewrite: if True, run the Haiku query rewriter before classification
-                    to clean up colloquial/abbreviated input. Default off for
-                    backward compatibility.
+    enable_rewrite:  if True, run the Haiku query rewriter before classification
+                     to clean up colloquial/abbreviated input. Default off for
+                     backward compatibility.
+    skip_generation: if True, stop after reranking and return a response with
+                     `retrieved_meta` populated but no answer. No Sonnet call,
+                     so retrieval experiments cost only the classifier.
     """
     import time
     t_start = time.perf_counter()
@@ -357,7 +427,8 @@ def ask(
     # Step 2: Retrieve
     candidates = _retrieve(question, clf)
     if verbose:
-        print(f"[retrieval] {len(candidates)} candidates returned")
+        print(f"[retrieval] {len(candidates)} candidates returned "
+              f"(mode={RETRIEVAL_MODE})")
 
     if not candidates:
         from datetime import date as _date
@@ -375,6 +446,7 @@ def ask(
             original_query=original_query,
             rewritten_query=rewritten_query,
             rewrite_changed=rewrite_changed,
+            generation_skipped=skip_generation,
         )
 
     # Step 3: Rerank
@@ -390,16 +462,29 @@ def ask(
         if chunk_id in meta_lookup
     ]
 
-    # Step 4: Generate
-    result = _generate(question, top_chunks, clf)
+    # Step 4: Generate (unless we're only measuring retrieval)
+    if skip_generation:
+        result = QueryResponse(
+            answer="",
+            citations=[],
+            temporal_basis="",
+            confidence="high",
+            referred_to_advisor=False,
+            classifier=clf,
+            generation_skipped=True,
+        )
+    else:
+        result = _generate(question, top_chunks, clf)
+
     result.latency_ms = int((time.perf_counter() - t_start) * 1000)
     result.original_query = original_query
     result.rewritten_query = rewritten_query
     result.rewrite_changed = rewrite_changed
     result.retrieved_chunk_ids = [str(chunk_id) for chunk_id, _, _ in reranked]
     result.retrieved_scores = [float(score) for _, _, score in reranked]
+    result.retrieved_meta = _meta_from_chunks(top_chunks, reranked)
 
-    if verbose:
+    if verbose and not skip_generation:
         print(f"[generator] confidence={result.confidence} | "
               f"citations={len(result.citations)} | "
               f"latency={result.latency_ms}ms | "
@@ -419,14 +504,22 @@ if __name__ == "__main__":
     if "--rewrite" in args:
         enable_rewrite = True
         args.remove("--rewrite")
+    skip_gen = False
+    if "--no-generation" in args:
+        skip_gen = True
+        args.remove("--no-generation")
 
     question = " ".join(args) if args else None
     if not question:
-        print("Usage: python -m rag.query [--rewrite] <question>")
+        print("Usage: python -m rag.query [--rewrite] [--no-generation] <question>")
         print('Example: python -m rag.query "Koji je rok za predaju PDV obrasca?"')
         sys.exit(1)
 
     print(f"\nPitanje: {question}\n{'='*60}")
-    result = ask(question, verbose=True, enable_rewrite=enable_rewrite)
+    result = ask(question, verbose=True, enable_rewrite=enable_rewrite,
+                 skip_generation=skip_gen)
     print(f"\n{'='*60}")
-    print(json.dumps(result.to_dict(), ensure_ascii=False, indent=2))
+    if skip_gen:
+        print(json.dumps(result.retrieved_meta, ensure_ascii=False, indent=2))
+    else:
+        print(json.dumps(result.to_dict(), ensure_ascii=False, indent=2))

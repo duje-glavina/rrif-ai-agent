@@ -10,7 +10,9 @@ venv/
 .idea/
 *.log
 benchmark/results/*.tmp
-
+.claude/worktrees/
+dump_*.txt
+*.bak.py
 
 logs/
 eval/results/
