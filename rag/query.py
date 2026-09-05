@@ -576,7 +576,10 @@ def ask(
 
 if __name__ == "__main__":
     import sys
-    logging.basicConfig(level=logging.INFO)
+    # WARNING at the root keeps httpx/huggingface chatter out of the way;
+    # our own retrieval messages still come through.
+    logging.basicConfig(level=logging.WARNING)
+    logging.getLogger("rag").setLevel(logging.INFO)
 
     args = sys.argv[1:]
     enable_rewrite = "--rewrite" in args
