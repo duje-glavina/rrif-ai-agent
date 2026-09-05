@@ -1,41 +1,81 @@
 """End-to-end query pipeline for the RRiF AI Agent.
 
-Orchestrates the full RAG flow:
   1. Classify question (Haiku)         → domain, subdomains, time_period
-  2. Hybrid retrieval with filters     → top 20 candidates (semantic + FTS, RRF fused)
-  3. Cross-encoder reranking (BGE)     → top 5 most relevant chunks
+  2. Hybrid retrieval, ONE CTE query   → top-N candidates (pgvector + FTS, RRF in SQL)
+  3. Cross-encoder reranking (BGE)     → top-K chunks
   4. Answer generation (Sonnet)        → answer + citations + temporal basis
   5. Return structured QueryResponse
 
-Retrieval uses a three-level fallback:
-  tight  → domain + subdomain(s)
-  medium → domain only
-  wide   → no filter (last resort)
 
-Two experiment hooks, both off by default:
+THREE FIXES IN THIS REVISION
+────────────────────────────
 
-  RETRIEVAL_MODE=tight|domain|wide
-      Skip straight to a given filter level. 'wide' is the category-filter
-      ablation: retrieve without domain/subdomain narrowing and let the
-      reranker do the discriminating.
+1. ONE RERANK CALL PER QUESTION (was up to four)
 
-  ask(..., skip_generation=True)
-      Stop after reranking. No Sonnet call, so retrieval experiments are
-      genuinely free and fast. `retrieved_meta` is still populated, which is
-      what the eval harness grades retrieval on.
+   The old `_retrieve` ran a three-level fallback and called
+   `_top_rerank_score` at every level before deciding whether to widen, then
+   reranked again at the end — up to four sequential invocations, ~35 scored
+   pairs. Locally that is one batched pass and nearly free; over an API it is
+   four network round-trips, which does not fit the 200 ms retrieval+rerank
+   budget in the VOICE sheet or the 2 s first-token criterion in F4.
+
+   Now: candidates are gathered per level, and each level reranks only the
+   chunks it newly contributed, with scores cached. The common case (tight
+   filter is good enough) is exactly one call over ~20 pairs. The worst case
+   is three calls but still ~20 pairs total, because nothing is scored twice.
+
+2. TEMPORAL FILTER NOW APPLIES TO MAGAZINE CHUNKS TOO
+
+   The old WHERE clause read:
+
+       (source_type != 'članak' AND ({sql_time}) OR source_type = 'članak')
+
+   Operator precedence makes that `(not članak AND time_ok) OR is članak`, so
+   every magazine chunk bypassed the time filter while statute had to satisfy
+   it. With 5,174 of 12,561 magazine chunks marked `nevazeci`, 41% of the
+   corpus competed on current-state questions with no temporal constraint —
+   which is why "Kolika je opća stopa PDV-a?" returned a 2014 article about
+   the old 13% rate, scoring 0.99.
+
+   The exemption existed because every magazine chunk has `valid_to` set
+   (none NULL), so a `valid_to IS NULL` test would delete the whole corpus.
+   But `sql_time` for a current question is `status = 'vazeci'`, and 7,387
+   magazine chunks satisfy that. The exemption was never needed.
+
+   TEMPORAL_MODE=strict (default) applies the filter to everything.
+   TEMPORAL_MODE=legacy restores the exemption, for A/B comparison.
+
+3. CONNECTION POOLING AND A SINGLE CTE
+
+   Was: a fresh `psycopg.connect()` per call, two queries per retrieval
+   attempt, up to three attempts, plus one more connection per HTTP request
+   in the API layer — up to seven new TLS connections per question, and an
+   N+1 pattern the tech spec explicitly forbids.
+
+   Now: one process-wide `ConnectionPool` (pgvector registered once per
+   connection), and semantic + FTS + RRF fusion in a single round trip.
+
+   Requires `psycopg_pool` — add to requirements.txt.
+
+
+EXPERIMENT HOOKS (all default to production behaviour)
+
+  RETRIEVAL_MODE=tight|domain|wide   skip straight to a filter level
+  TEMPORAL_MODE=strict|legacy        see fix 2
+  ask(..., skip_generation=True)     stop after reranking, no Sonnet call
 """
 from __future__ import annotations
 
 import json
 import logging
 import os
+import re
 from dataclasses import dataclass, field
-from datetime import date
 from typing import Literal
 
-import psycopg
 from dotenv import load_dotenv
 from pgvector.psycopg import register_vector
+from psycopg_pool import ConnectionPool
 
 from rag.classifier import ClassifierResult, classify
 from rag.embedder import embed_query
@@ -50,21 +90,52 @@ log = logging.getLogger(__name__)
 # ── Configuration ─────────────────────────────────────────────────────────────
 
 GENERATOR_MODEL         = "claude-sonnet-4-6"
-CANDIDATES              = 20
-TOP_K                   = 5
+POOL_PER_RANKER         = 50   # rows each CTE branch contributes before fusion
+CANDIDATES              = 20   # candidates surviving fusion, sent to the reranker
+TOP_K                   = 5    # chunks handed to the generator
 RRF_K                   = 60
-MIN_FALLBACK_CANDIDATES = 5   # widen filter if fewer candidates than this
-RERANK_THRESHOLD = 0.75
+MIN_FALLBACK_CANDIDATES = 5
+RERANK_THRESHOLD        = 0.75
 
-# Experiment hook: which filter level to start (and stay) at.
-#   tight  — domain + subdomains, with the normal fallback chain (default)
-#   domain — skip the subdomain narrowing, start at domain-only
-#   wide   — no domain filter at all; the ablation
 RETRIEVAL_MODE = os.getenv("RETRIEVAL_MODE", "tight").lower()
 if RETRIEVAL_MODE not in {"tight", "domain", "wide"}:
-    raise ValueError(
-        f"RETRIEVAL_MODE must be tight|domain|wide, got {RETRIEVAL_MODE!r}"
-    )
+    raise ValueError(f"RETRIEVAL_MODE must be tight|domain|wide, got {RETRIEVAL_MODE!r}")
+
+TEMPORAL_MODE = os.getenv("TEMPORAL_MODE", "strict").lower()
+if TEMPORAL_MODE not in {"strict", "legacy"}:
+    raise ValueError(f"TEMPORAL_MODE must be strict|legacy, got {TEMPORAL_MODE!r}")
+
+
+# ── Connection pool ───────────────────────────────────────────────────────────
+
+_POOL: ConnectionPool | None = None
+
+
+def _pool() -> ConnectionPool:
+    """One pool for the process, with pgvector registered per connection.
+
+    register_vector() rewrites type adapters on the connection, which is why
+    the old code opened a separate plain connection for FTS. Doing it once in
+    the pool's configure hook removes that constraint entirely.
+    """
+    global _POOL
+    if _POOL is None:
+        _POOL = ConnectionPool(
+            conninfo=os.environ["DATABASE_URL"],
+            min_size=int(os.getenv("PG_POOL_MIN", "1")),
+            max_size=int(os.getenv("PG_POOL_MAX", "10")),
+            configure=register_vector,
+            open=True,
+        )
+    return _POOL
+
+
+def close_pool() -> None:
+    """For clean shutdown in the API layer (FastAPI lifespan)."""
+    global _POOL
+    if _POOL is not None:
+        _POOL.close()
+        _POOL = None
 
 
 # ── Response data classes ─────────────────────────────────────────────────────
@@ -95,13 +166,11 @@ class QueryResponse:
     rewrite_changed: bool = False
     retrieved_chunk_ids: list[str] = field(default_factory=list)
     retrieved_scores: list[float] = field(default_factory=list)
-    # What retrieval actually returned, before the generator had any say.
-    # One dict per reranked chunk: chunk_id, source, article_number,
-    # source_type, status, rerank_score. Grade retrieval on THIS, not on
-    # citations — citations reflect what the LLM chose to cite, which is a
-    # different (and later) thing.
+    # What retrieval returned, before the generator had any say. Grade
+    # retrieval on this, not on citations.
     retrieved_meta: list[dict] = field(default_factory=list)
     generation_skipped: bool = False
+    n_rerank_calls: int = 0
 
     def to_dict(self) -> dict:
         return {
@@ -131,181 +200,215 @@ class QueryResponse:
                 "rewritten_query": self.rewritten_query,
                 "rewrite_changed": self.rewrite_changed,
                 "retrieval_mode": RETRIEVAL_MODE,
+                "temporal_mode": TEMPORAL_MODE,
+                "n_rerank_calls": self.n_rerank_calls,
                 "generation_skipped": self.generation_skipped,
             },
         }
 
-# ── Retrieval helpers ─────────────────────────────────────────────────────────
+
+# ── Retrieval ─────────────────────────────────────────────────────────────────
+
+_WORD_RE = re.compile(r"\w+", re.UNICODE)
+
+
+def _build_tsquery(question: str) -> str | None:
+    """OR-joined tokens, sanitised.
+
+    The old version did `" | ".join(question.split())`, which hands raw
+    punctuation to to_tsquery — 'PDV-a' is a syntax error, and the whole FTS
+    branch was wrapped in try/except to swallow it. Extracting \\w+ runs makes
+    the query always valid, so a silent FTS failure can no longer look like
+    "the keyword search just didn't match anything".
+
+    OR rather than AND is deliberate: recall first, then let RRF and the
+    reranker sort it out.
+    """
+    words = [w for w in _WORD_RE.findall(question) if len(w) >= 3]
+    return " | ".join(words) if words else None
+
 
 def _build_where(
     domain: str | None,
     subdomains: list[str] | None,
     sql_time: str | None,
-    params: list,
+    params: dict,
 ) -> str:
+    """WHERE fragment using NAMED placeholders, so it can appear in both CTE
+    branches without duplicating positional parameters."""
     clauses = ["citable = TRUE"]
 
     if domain and subdomains:
-        clauses.append("domain = %s AND subdomain = ANY(%s)")
-        params.extend([domain, subdomains])
+        clauses.append("domain = %(domain)s AND subdomain = ANY(%(subdomains)s)")
+        params["domain"] = domain
+        params["subdomains"] = list(subdomains)
     elif domain:
-        clauses.append("domain = %s")
-        params.append(domain)
+        clauses.append("domain = %(domain)s")
+        params["domain"] = domain
 
     if sql_time:
-        clauses.append(f"(source_type != 'članak' AND ({sql_time}) OR source_type = 'članak')")
+        if TEMPORAL_MODE == "strict":
+            # Applies to every source type. See fix 2 in the module docstring.
+            clauses.append(f"({sql_time})")
+        else:
+            clauses.append(
+                f"(source_type <> 'članak' AND ({sql_time}) OR source_type = 'članak')"
+            )
 
     return " AND ".join(clauses)
 
 
-def _semantic_fts_search(
+_SELECT_COLS = """c.id, c.chunk_text, c.source, c.article_number,
+                  c.valid_from::text, c.valid_to::text,
+                  c.source_type, c.extra_metadata, c.status"""
+
+
+def _hybrid_search(
     question: str,
     qvec,
-    where_sql: str,
-    params: list,
-    n: int,
-) -> tuple[dict, dict]:
-    """Run semantic + FTS search. Returns (sem_rows, fts_rows) dicts keyed by chunk id."""
-    fts_rows: dict = {}
-    sem_rows: dict = {}
+    domain: str | None,
+    subdomains: list[str] | None,
+    sql_time: str | None,
+) -> list[tuple]:
+    """Semantic + FTS + RRF fusion in a single round trip.
 
-    with psycopg.connect(os.environ["DATABASE_URL"]) as conn:
-        register_vector(conn)
-        with conn.cursor() as cur:
+    Each branch is limited BEFORE numbering, so the vector branch still uses
+    the HNSW index and the FTS branch still uses the GIN index; row_number()
+    then runs over 50 rows rather than the whole table.
+    """
+    params: dict = {}
+    where = _build_where(domain, subdomains, sql_time, params)
+    tsq = _build_tsquery(question)
 
-            # FTS search
-            words = [w for w in question.split() if len(w) >= 3]
-            if words:
-                tsquery = " | ".join(words)
-                try:
-                    cur.execute(
-                        f"""
-                        SELECT id, chunk_text, source, article_number,
-                               valid_from::text, valid_to::text,
-                               source_type, extra_metadata, status
-                        FROM chunks
-                        WHERE {where_sql}
-                          AND to_tsvector('simple', chunk_text)
-                              @@ to_tsquery('simple', %s)
-                        ORDER BY ts_rank_cd(
-                            to_tsvector('simple', chunk_text),
-                            to_tsquery('simple', %s)
-                        ) DESC
-                        LIMIT %s
-                        """,
-                        params + [tsquery, tsquery, n],
-                    )
-                    fts_rows = {row[0]: row for row in cur.fetchall()}
-                except Exception as e:
-                    log.warning("FTS search failed: %s", e)
+    params.update({
+        "qvec": qvec,
+        "pool": POOL_PER_RANKER,
+        "rrf_k": RRF_K,
+        "candidates": CANDIDATES,
+    })
 
-            # Semantic search
-            cur.execute(
-                f"""
-                SELECT id, chunk_text, source, article_number,
-                       valid_from::text, valid_to::text,
-                       source_type, extra_metadata, status
+    vec_cte = f"""
+        vec AS (
+            SELECT id, row_number() OVER (ORDER BY dist) AS rnk
+            FROM (
+                SELECT id, embedding <=> %(qvec)s AS dist
                 FROM chunks
-                WHERE {where_sql}
-                ORDER BY embedding <=> %s
-                LIMIT %s
-                """,
-                params + [qvec, n],
-            )
-            sem_rows = {row[0]: row for row in cur.fetchall()}
+                WHERE {where} AND embedding IS NOT NULL
+                ORDER BY embedding <=> %(qvec)s
+                LIMIT %(pool)s
+            ) t
+        )"""
 
-    return sem_rows, fts_rows
+    if tsq:
+        params["tsq"] = tsq
+        fts_cte = f""",
+        fts AS (
+            SELECT id, row_number() OVER (ORDER BY score DESC) AS rnk
+            FROM (
+                SELECT id,
+                       ts_rank_cd(to_tsvector('simple', chunk_text),
+                                  to_tsquery('simple', %(tsq)s)) AS score
+                FROM chunks
+                WHERE {where}
+                  AND to_tsvector('simple', chunk_text)
+                      @@ to_tsquery('simple', %(tsq)s)
+                ORDER BY score DESC
+                LIMIT %(pool)s
+            ) t
+        )"""
+        fused = """
+        fused AS (
+            SELECT COALESCE(v.id, f.id) AS id,
+                   COALESCE(1.0 / (%(rrf_k)s + v.rnk), 0.0)
+                 + COALESCE(1.0 / (%(rrf_k)s + f.rnk), 0.0) AS rrf
+            FROM vec v FULL OUTER JOIN fts f ON f.id = v.id
+        )"""
+    else:
+        # No usable keyword tokens — vector branch only.
+        fts_cte = ""
+        fused = """
+        fused AS (
+            SELECT id, 1.0 / (%(rrf_k)s + rnk) AS rrf FROM vec
+        )"""
+
+    sql = f"""
+        WITH {vec_cte}{fts_cte},{fused}
+        SELECT {_SELECT_COLS}
+        FROM fused fu JOIN chunks c ON c.id = fu.id
+        ORDER BY fu.rrf DESC
+        LIMIT %(candidates)s
+    """
+
+    with _pool().connection() as conn:
+        with conn.cursor() as cur:
+            cur.execute(sql, params)
+            return cur.fetchall()
 
 
-def _rrf_merge(sem_rows: dict, fts_rows: dict) -> list[tuple]:
-    """Reciprocal Rank Fusion. Returns rows sorted by RRF score."""
-    sem_ranks = {rid: i + 1 for i, rid in enumerate(sem_rows)}
-    fts_ranks = {rid: i + 1 for i, rid in enumerate(fts_rows)}
-    all_ids = set(sem_ranks) | set(fts_ranks)
-
-    scored = []
-    for rid in all_ids:
-        score = 0.0
-        if rid in sem_ranks:
-            score += 1.0 / (RRF_K + sem_ranks[rid])
-        if rid in fts_ranks:
-            score += 1.0 / (RRF_K + fts_ranks[rid])
-        row = sem_rows.get(rid) or fts_rows.get(rid)
-        scored.append((
-            score,
-            row[0], row[1], row[2], row[3], row[4], row[5],
-            row[6] if len(row) > 6 else None,
-            row[7] if len(row) > 7 else None,
-            row[8] if len(row) > 8 else None,
-        ))
-    scored.sort(key=lambda t: t[0], reverse=True)
-    return [(r[1], r[2], r[3], r[4], r[5], r[6], r[7], r[8], r[9]) for r in scored[:CANDIDATES]]
+def _levels(f: dict) -> list[tuple[str | None, list[str] | None]]:
+    """Filter levels to try, in order, per RETRIEVAL_MODE."""
+    if RETRIEVAL_MODE == "wide":
+        return [(None, None)]
+    if RETRIEVAL_MODE == "domain":
+        return [(f["domain"], None), (None, None)]
+    return [(f["domain"], f["subdomains"]), (f["domain"], None), (None, None)]
 
 
+def _retrieve_and_rank(question: str, clf: ClassifierResult) -> tuple[list[tuple], dict, int]:
+    """Gather candidates, widening only when needed, and rerank incrementally.
 
+    Returns (top_chunks, scores_by_chunk_id, n_rerank_calls).
 
-def _top_rerank_score(question: str, candidates: list[tuple]) -> float:
-    """Check relevance quality of candidates by reranking top 5."""
-    if not candidates:
-        return 0.0
-    rerank_input = [(row[0], row[1]) for row in candidates[:5]]
-    reranked = rerank(question, rerank_input, k=1)
-    return reranked[0][2] if reranked else 0.0
-
-
-def _retrieve(question: str, clf: ClassifierResult) -> list[tuple]:
-    """Hybrid retrieval with three-level fallback.
-
-    1. tight  — domain + subdomains  (if enough candidates AND quality ok)
-    2. medium — domain only          (if tight fails count or quality check)
-    3. wide   — no filter            (if medium fails count or quality check)
-
-    RETRIEVAL_MODE short-circuits this: 'wide' goes straight to the
-    unfiltered search (the ablation), 'domain' starts at level 2.
+    Each level reranks only what it newly contributed; scores are cached, so
+    no (query, passage) pair is ever scored twice. One call in the common case.
     """
     qvec = embed_query(question)
-    filters = clf.to_retrieval_filter()
-    sql_time = filters["sql_time_filter"]
+    f = clf.to_retrieval_filter()
+    sql_time = f["sql_time_filter"]
 
-    # Ablation: no domain/subdomain filter at all.
-    if RETRIEVAL_MODE == "wide":
-        params: list = []
-        where_sql = _build_where(None, None, sql_time, params)
-        sem, fts = _semantic_fts_search(question, qvec, where_sql, params, CANDIDATES)
-        candidates = _rrf_merge(sem, fts)
-        log.debug("_retrieve wide (ablation): %d candidates", len(candidates))
-        return candidates
+    pool: dict = {}            # chunk_id -> row
+    scores: dict[str, float] = {}
+    n_calls = 0
+    levels = _levels(f)
 
-    # Attempt 1: tight
-    if RETRIEVAL_MODE == "tight":
-        params = []
-        where_sql = _build_where(filters["domain"], filters["subdomains"], sql_time, params)
-        sem_rows, fts_rows = _semantic_fts_search(question, qvec, where_sql, params, CANDIDATES)
-        candidates = _rrf_merge(sem_rows, fts_rows)
+    for i, (domain, subdomains) in enumerate(levels):
+        rows = _hybrid_search(question, qvec, domain, subdomains, sql_time)
+        fresh = [r for r in rows if r[0] not in pool]
+        for r in rows:
+            pool.setdefault(r[0], r)
 
-        if len(candidates) >= MIN_FALLBACK_CANDIDATES and _top_rerank_score(question, candidates) >= RERANK_THRESHOLD:
-            log.debug("_retrieve tight: %d (domain=%s subdomains=%s)",
-                      len(candidates), filters["domain"], filters["subdomains"])
-            return candidates
-        log.info("_retrieve → domain-only fallback (tight=%d, domain=%s)",
-                 len(candidates), filters["domain"])
+        if fresh:
+            scored = rerank(question, [(r[0], r[1]) for r in fresh], k=len(fresh))
+            n_calls += 1
+            for cid, _, s in scored:
+                scores[str(cid)] = float(s)
 
-    # Attempt 2: domain-only
-    fb = clf.fallback_filter()
-    params2: list = []
-    where_sql2 = _build_where(fb["domain"], None, sql_time, params2)
-    sem2, fts2 = _semantic_fts_search(question, qvec, where_sql2, params2, CANDIDATES)
-    candidates2 = _rrf_merge(sem2, fts2)
+        if not pool:
+            continue
 
-    if len(candidates2) >= MIN_FALLBACK_CANDIDATES and _top_rerank_score(question, candidates2) >= RERANK_THRESHOLD:
-        return candidates2
+        ordered = sorted(
+            pool.values(),
+            key=lambda r: scores.get(str(r[0]), 0.0),
+            reverse=True,
+        )
+        best = scores.get(str(ordered[0][0]), 0.0)
 
-    # Attempt 3: unfiltered
-    log.info("_retrieve → unfiltered fallback (domain-level=%d)", len(candidates2))
-    params3: list = []
-    where_sql3 = _build_where(None, None, sql_time, params3)
-    sem3, fts3 = _semantic_fts_search(question, qvec, where_sql3, params3, CANDIDATES)
-    return _rrf_merge(sem3, fts3)
+        enough = len(pool) >= MIN_FALLBACK_CANDIDATES
+        good = best >= RERANK_THRESHOLD
+        if (enough and good) or i == len(levels) - 1:
+            log.debug(
+                "_retrieve level=%d pool=%d best=%.3f rerank_calls=%d",
+                i, len(pool), best, n_calls,
+            )
+            return ordered[:TOP_K], scores, n_calls
+
+        log.info(
+            "_retrieve widening after level %d (pool=%d, best=%.3f)",
+            i, len(pool), best,
+        )
+
+    return [], scores, n_calls
+
 
 # ── Generation ────────────────────────────────────────────────────────────────
 
@@ -317,16 +420,16 @@ def _generate(question: str, top_chunks: list[tuple], clf: ClassifierResult) -> 
     for row in top_chunks:
         em = row[7] if len(row) > 7 and row[7] else {}
         chunks_for_answerer.append({
-            "chunk_id":       row[0] if len(row) > 0 else None,
-            "chunk_text":     row[1] if len(row) > 1 else "",
-            "source":         row[2] if len(row) > 2 else "",
+            "chunk_id":       row[0],
+            "chunk_text":     row[1],
+            "source":         row[2],
             "law_name":       None,
             "nn_reference":   None,
-            "article_number": row[3] if len(row) > 3 else None,
-            "valid_from":     row[4] if len(row) > 4 else None,
-            "valid_to":       row[5] if len(row) > 5 else None,
-            "status": row[8] if len(row) > 8 else "nevazeci",
-            "source_type":    row[6] if len(row) > 6 else None,
+            "article_number": row[3],
+            "valid_from":     row[4],
+            "valid_to":       row[5],
+            "status":         row[8] if len(row) > 8 else "nevazeci",
+            "source_type":    row[6],
             "pub_label":      em.get("pub_label", ""),
             "title":          em.get("title", ""),
             "author":         em.get("author", ""),
@@ -339,6 +442,8 @@ def _generate(question: str, top_chunks: list[tuple], clf: ClassifierResult) -> 
 
     citations = [
         Citation(
+            # law_name is hardcoded None above, so without the fallback every
+            # citation came back with an empty source.
             source=c.get("law_name") or c.get("source") or "",
             article_number=c.get("article_number"),
             valid_from=None,
@@ -363,26 +468,18 @@ def _generate(question: str, top_chunks: list[tuple], clf: ClassifierResult) -> 
     )
 
 
-def _meta_from_chunks(top_chunks: list[tuple], reranked: list[tuple]) -> list[dict]:
-    """Flatten the reranked chunks into a gradeable retrieval record.
-
-    This is deliberately independent of generation: it says what retrieval
-    put in front of the model, in rank order, with the real cross-encoder
-    score attached.
-    """
-    scores = {str(cid): float(s) for cid, _, s in reranked}
-    meta = []
-    for row in top_chunks:
-        cid = str(row[0])
-        meta.append({
-            "chunk_id":       cid,
-            "source":         row[2] if len(row) > 2 else None,
-            "article_number": row[3] if len(row) > 3 else None,
-            "source_type":    row[6] if len(row) > 6 else None,
+def _meta(top_chunks: list[tuple], scores: dict) -> list[dict]:
+    return [
+        {
+            "chunk_id":       str(row[0]),
+            "source":         row[2],
+            "article_number": row[3],
+            "source_type":    row[6],
             "status":         row[8] if len(row) > 8 else None,
-            "rerank_score":   scores.get(cid),
-        })
-    return meta
+            "rerank_score":   scores.get(str(row[0])),
+        }
+        for row in top_chunks
+    ]
 
 
 # ── Public API ────────────────────────────────────────────────────────────────
@@ -395,17 +492,12 @@ def ask(
 ) -> QueryResponse:
     """Full RAG pipeline: classify → retrieve → rerank → generate.
 
-    enable_rewrite:  if True, run the Haiku query rewriter before classification
-                     to clean up colloquial/abbreviated input. Default off for
-                     backward compatibility.
-    skip_generation: if True, stop after reranking and return a response with
-                     `retrieved_meta` populated but no answer. No Sonnet call,
-                     so retrieval experiments cost only the classifier.
+    skip_generation: stop after reranking. `retrieved_meta` is still populated,
+                     which is what the eval harness grades retrieval on.
     """
     import time
     t_start = time.perf_counter()
 
-    # Step 0: Rewrite (optional)
     original_query = question
     rewritten_query = question
     rewrite_changed = False
@@ -413,24 +505,23 @@ def ask(
         rw = rewrite(question)
         rewritten_query = rw.rewritten
         rewrite_changed = rw.changed
-        question = rw.rewritten  # downstream stages see the rewritten query
+        question = rw.rewritten
         if verbose:
             marker = "(changed)" if rw.changed else "(unchanged)"
             print(f"[rewriter] {marker} → {rw.rewritten!r}")
 
-    # Step 1: Classify
     clf = classify(question)
     if verbose:
         print(f"[classifier] domain={clf.domain} subdomains={clf.subdomains} | "
               f"time={clf.time_period.type} | recency={clf.recency_boost}")
 
-    # Step 2: Retrieve
-    candidates = _retrieve(question, clf)
+    top_chunks, scores, n_calls = _retrieve_and_rank(question, clf)
     if verbose:
-        print(f"[retrieval] {len(candidates)} candidates returned "
-              f"(mode={RETRIEVAL_MODE})")
+        print(f"[retrieval] {len(top_chunks)} chunks "
+              f"(mode={RETRIEVAL_MODE}, temporal={TEMPORAL_MODE}, "
+              f"rerank_calls={n_calls})")
 
-    if not candidates:
+    if not top_chunks:
         from datetime import date as _date
         return QueryResponse(
             answer=(
@@ -447,22 +538,9 @@ def ask(
             rewritten_query=rewritten_query,
             rewrite_changed=rewrite_changed,
             generation_skipped=skip_generation,
+            n_rerank_calls=n_calls,
         )
 
-    # Step 3: Rerank
-    rerank_input = [(row[0], row[1]) for row in candidates]
-    reranked = rerank(question, rerank_input, k=TOP_K)
-    if verbose:
-        print(f"[reranker] top {len(reranked)} chunks selected")
-
-    meta_lookup = {row[0]: row for row in candidates}
-    top_chunks = [
-        meta_lookup[chunk_id]
-        for chunk_id, _, _ in reranked
-        if chunk_id in meta_lookup
-    ]
-
-    # Step 4: Generate (unless we're only measuring retrieval)
     if skip_generation:
         result = QueryResponse(
             answer="",
@@ -480,9 +558,10 @@ def ask(
     result.original_query = original_query
     result.rewritten_query = rewritten_query
     result.rewrite_changed = rewrite_changed
-    result.retrieved_chunk_ids = [str(chunk_id) for chunk_id, _, _ in reranked]
-    result.retrieved_scores = [float(score) for _, _, score in reranked]
-    result.retrieved_meta = _meta_from_chunks(top_chunks, reranked)
+    result.retrieved_chunk_ids = [str(r[0]) for r in top_chunks]
+    result.retrieved_scores = [scores.get(str(r[0]), 0.0) for r in top_chunks]
+    result.retrieved_meta = _meta(top_chunks, scores)
+    result.n_rerank_calls = n_calls
 
     if verbose and not skip_generation:
         print(f"[generator] confidence={result.confidence} | "
@@ -497,22 +576,16 @@ def ask(
 
 if __name__ == "__main__":
     import sys
-    logging.basicConfig(level=logging.WARNING)
+    logging.basicConfig(level=logging.INFO)
 
     args = sys.argv[1:]
-    enable_rewrite = False
-    if "--rewrite" in args:
-        enable_rewrite = True
-        args.remove("--rewrite")
-    skip_gen = False
-    if "--no-generation" in args:
-        skip_gen = True
-        args.remove("--no-generation")
+    enable_rewrite = "--rewrite" in args
+    skip_gen = "--no-generation" in args
+    args = [a for a in args if not a.startswith("--")]
 
     question = " ".join(args) if args else None
     if not question:
         print("Usage: python -m rag.query [--rewrite] [--no-generation] <question>")
-        print('Example: python -m rag.query "Koji je rok za predaju PDV obrasca?"')
         sys.exit(1)
 
     print(f"\nPitanje: {question}\n{'='*60}")
@@ -523,3 +596,4 @@ if __name__ == "__main__":
         print(json.dumps(result.retrieved_meta, ensure_ascii=False, indent=2))
     else:
         print(json.dumps(result.to_dict(), ensure_ascii=False, indent=2))
+    close_pool()

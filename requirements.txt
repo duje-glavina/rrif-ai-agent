@@ -1,4 +1,4 @@
-﻿annotated-doc==0.0.4
+annotated-doc==0.0.4
 annotated-types==0.7.0
 anthropic==0.97.0
 anyio==4.13.0
@@ -66,3 +66,4 @@ typing-inspection==0.4.2
 typing_extensions==4.15.0
 tzdata==2026.2
 uvicorn==0.47.0
+psycopg-pool
