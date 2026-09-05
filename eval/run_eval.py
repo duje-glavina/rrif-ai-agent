@@ -134,10 +134,21 @@ def _parse_source_key(text: str | None) -> tuple[str, int, int] | None:
         return None
     head = text.split("—")[0]
 
-    m = _ISSUE_RE.search(head) or re.search(r"(\d+)\s*/\s*(\d{4})", head)
-    if not m:
+    m = _ISSUE_RE.search(head)
+    if m:
+        issue, year = int(m.group(1)), int(m.group(2))
+    else:
+        # Bare 'N/YYYY' (the golden set shorthand). Bounded to 1–12 because a
+        # magazine has at most twelve issues a year — without that, an NN law
+        # reference in the source string parses as an issue and you get
+        # nonsense like 'RRiF 73/2013' (NN 73/13 is the VAT Act).
+        m = re.search(r"\b([1-9]|1[0-2])\s*/\s*(\d{4})\b", head)
+        if not m:
+            return None
+        issue, year = int(m.group(1)), int(m.group(2))
+
+    if not 1 <= issue <= 12:
         return None
-    issue, year = int(m.group(1)), int(m.group(2))
 
     low = head.lower()
     pub = "PiP" if ("pip" in low or "pravo i porezi" in low
@@ -203,12 +214,16 @@ def evaluate_one(item: dict, *, skip_generation: bool, enable_rewrite: bool) -> 
     # not an article of a law, so including them here produces false hits
     # against expected values like ["38"]. The real magazine article number
     # lives in extra_metadata.article_num.
-    retrieved_articles = [
+    # Rank-ordered, one slot per retrieved chunk, None where the chunk is not
+    # statute. Keeping the positions is what makes "top-1" mean rank 1 OVERALL
+    # rather than "the first law chunk anywhere in the top-5" — collapsing the
+    # list first turned top-1 into a much weaker claim and inflated it.
+    law_articles_ranked = [
         _extract_article_number(m.get("article_number"))
+        if m.get("source_type") != "članak" else None
         for m in result.retrieved_meta
-        if m.get("source_type") != "članak"
     ]
-    retrieved_articles = [a for a in retrieved_articles if a]
+    retrieved_articles = [a for a in law_articles_ranked if a]
 
     # Kept for diagnostics — what the old, collision-prone grading saw.
     retrieved_articles_any = [
@@ -219,7 +234,7 @@ def evaluate_one(item: dict, *, skip_generation: bool, enable_rewrite: bool) -> 
     ]
 
     if gradeable_retrieval:
-        retrieval_top_1 = bool(retrieved_articles) and retrieved_articles[0] in expected
+        retrieval_top_1 = bool(law_articles_ranked) and law_articles_ranked[0] in expected
         retrieval_top_k = any(a in expected for a in retrieved_articles)
     else:
         retrieval_top_1 = None
