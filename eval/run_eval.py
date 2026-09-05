@@ -252,16 +252,30 @@ def evaluate_one(item: dict, *, skip_generation: bool, enable_rewrite: bool) -> 
     keywords = [k for k in (item.get("expected_keywords") or []) if k]
     gradeable_content = bool(in_corpus and keywords)
 
+    def _norm(s: str) -> str:
+        """Collapse whitespace and close up '20 %' → '20%'.
+
+        Croatian typography puts a space before the percent sign, and the
+        golden set writes '20%', so an exact substring test misses a chunk
+        that plainly contains the answer. Same for the non-breaking spaces
+        and soft hyphens the PDF extraction leaves behind.
+        """
+        s = s.lower().replace(" ", " ").replace("­", "")
+        s = re.sub(r"\s+", " ", s)
+        return re.sub(r"\s+%", "%", s)
+
     def _text(m: dict) -> str:
-        return (m.get("chunk_text") or "").lower()
+        return _norm(m.get("chunk_text") or "")
+
+    _kw = [_norm(k) for k in keywords]
 
     def _has_all(m: dict) -> bool:
         t = _text(m)
-        return all(k.lower() in t for k in keywords)
+        return all(k in t for k in _kw)
 
     def _has_any(m: dict) -> bool:
         t = _text(m)
-        return any(k.lower() in t for k in keywords)
+        return any(k in t for k in _kw)
 
     if gradeable_content and result.retrieved_meta:
         content_top_1 = _has_all(result.retrieved_meta[0])
@@ -584,14 +598,17 @@ def main():
         print(f"  Total cost (this run):         ${metrics['total_cost_usd']:.5f}")
 
     print()
+    if nc:
+        print(f"  Note: {nc} questions graded on answer content "
+              f"(one = {100/nc:.1f} points) — this is the primary number.")
     if ns:
-        print(f"  Note: {ns} magazine questions graded on publication issue "
-              f"(one = {100/ns:.1f} points).")
+        print(f"        {ns} of those also graded on publication issue "
+              f"(coarse: recurring figures span many issues).")
     if ng:
         print(f"        {ng} law questions graded on article number "
               f"(one = {100/ng:.1f} points).")
-    print(f"        {metrics['n_questions'] - ns - ng} questions have no "
-          f"ground truth and are not graded.")
+    print(f"        {metrics['n_questions'] - nc} questions have no ground "
+          f"truth (traps and out-of-corpus) and are not graded.")
     if metrics["n_year_like_articles"]:
         print(f"  Note: {metrics['n_year_like_articles']} retrieved article_number values "
               f"look like years — magazine chunks storing a publication year "
