@@ -182,6 +182,7 @@
   query: "Kako se u neprofitnom računovodstvu evidentira unos građevinskog objekta u glavnu knjigu?"
   expected_articles: []
   expected_keywords: ["građevinski objekt", "glavna knjiga", "neprofitno"]
+  expected_sources: ["RRiF 11/2024"]
   expected_category: NPO
   in_corpus: true
   notes: "RRiF 11/2024. Specific enough to hit NPO chunks."
@@ -254,6 +255,7 @@
   query: "Kada se strani porezni obveznik treba registrirati za PDV u RH?"
   expected_articles: []
   expected_keywords: ["registrirati", "tuzemstvo", "isporuke"]
+  expected_sources: ["RRiF 11/2024"]
   expected_category: PDV
   in_corpus: true
   notes: "Magazine content from RRiF 11/2024. Tests retrieval of članak chunks."
@@ -262,6 +264,7 @@
   query: "Koji je novi prag za ulazak u sustav PDV-a od 2025. godine?"
   expected_articles: []
   expected_keywords: ["prag", "2025", "mali porezni obveznik"]
+  expected_sources: ["RRiF 12/2024"]
   expected_category: PDV
   in_corpus: true
   notes: "RRiF 12/2024. Tests recency — vazeci 2024 article."
@@ -272,6 +275,7 @@
   query: "Koja je neoporeziva svota nagrade za športska ostvarenja?"
   expected_articles: []
   expected_keywords: ["2.800", "godišnje"]
+  expected_sources: ["RRiF 1/2024"]
   expected_category: dohodak
   in_corpus: true
   notes: "RRiF 1/2024. Specific amount — easy to verify."
@@ -280,6 +284,7 @@
   query: "Kako se oporezuje studentska naknada iznad neoporezivog iznosa?"
   expected_articles: []
   expected_keywords: ["10.080", "neoporeziv"]
+  expected_sources: ["RRiF 9/2024"]
   expected_category: dohodak
   in_corpus: true
   notes: "RRiF 9/2024. Specific tax rate — good keyword grading."
@@ -288,6 +293,7 @@
   query: "Može li nerezident ostvariti uvećanje osobnog odbitka u RH?"
   expected_articles: []
   expected_keywords: ["90 %", "ZPP-DOH", "nerezident"]
+  expected_sources: ["RRiF 2/2024"]
   expected_category: dohodak
   in_corpus: true
   notes: "RRiF 2/2024. Tests nuanced dohodak retrieval."
@@ -298,6 +304,7 @@
   query: "Koliko posto troškova reprezentacije je porezno priznato?"
   expected_articles: []
   expected_keywords: ["50 %", "reprezentacija"]
+  expected_sources: ["RRiF 12/2024"]
   expected_category: dobit
   in_corpus: true
   notes: "RRiF 12/2024. Classic question with specific number."
@@ -306,6 +313,7 @@
   query: "Koji godišnji primitak obvezuje obrtnika da postane obveznik poreza na dobitak?"
   expected_articles: []
   expected_keywords: ["1.000.000", "€"]
+  expected_sources: ["RRiF 12/2024"]
   expected_category: dobit
   in_corpus: true
   notes: "RRiF 12/2024. Threshold question — good for keyword grading."
@@ -314,6 +322,7 @@
   query: "Što je porezno priznat manjak s motrišta poreza na dobitak?"
   expected_articles: []
   expected_keywords: ["porezno priznat", "manjak", "trošak"]
+  expected_sources: ["RRiF 12/2024"]
   expected_category: dobit
   in_corpus: true
   notes: "RRiF 12/2024."
@@ -324,6 +333,7 @@
   query: "Kolika je minimalna plaća u Hrvatskoj za 2024. godinu?"
   expected_articles: []
   expected_keywords: ["840", "€"]
+  expected_sources: ["RRiF 2/2024", "RRiF 10/2024"]
   expected_category: plaće
   in_corpus: true
   notes: "RRiF 2/2024 and 10/2024. Multiple sources."
@@ -332,6 +342,7 @@
   query: "Koja je minimalna mjesečna osnovica za obračun doprinosa za zaposlenog člana uprave u 2024.?"
   expected_articles: []
   expected_keywords: ["1.014", "€"]
+  expected_sources: ["RRiF 10/2024"]
   expected_category: plaće
   in_corpus: true
   notes: "RRiF 10/2024. Specific amount."
@@ -340,6 +351,7 @@
   query: "Moraju li strani radnici mlađi od 40 godina plaćati doprinos za MIO II. stup?"
   expected_articles: []
   expected_keywords: ["40 godina", "MIO II", "obvezno"]
+  expected_sources: ["RRiF 10/2024"]
   expected_category: plaće
   in_corpus: true
   notes: "RRiF 10/2024. Tests retrieval of stranac/MIO content."
@@ -358,6 +370,7 @@
   query: "Koliko može trajati neprekidno ustupanje radnika preko agencije za privremeno zapošljavanje?"
   expected_articles: []
   expected_keywords: ["tri godine", "agencija"]
+  expected_sources: ["PiP 10/2024"]
   expected_category: radno_pravo
   in_corpus: true
   notes: "PiP 10/2024. Likely misclassified as radno_pravo — tests fallback."

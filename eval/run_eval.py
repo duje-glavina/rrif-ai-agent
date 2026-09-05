@@ -109,6 +109,43 @@ def _looks_like_year(a: str | None) -> bool:
 
 
 # ---------------------------------------------------------------------------
+# Publication key — how magazine questions get graded
+# ---------------------------------------------------------------------------
+_ISSUE_RE = re.compile(r"br\.\s*(\d+)\s*/\s*(\d{4})")
+
+
+def _parse_source_key(text: str | None) -> tuple[str, int, int] | None:
+    """Normalise a publication reference to (pub, issue, year).
+
+    Handles both the DB's `source` column —
+
+        'RRiF br. 11/2024 — Na isporuku i ugradnju solarnih ploča…'
+        'Porezno i pravno (PiP) br. 11/2024 — PRAVO I POREZI, br. 11/24…'
+
+    — and the shorthand used in the golden set's expected_sources:
+
+        'RRiF 11/2024'   'PiP 10/2024'
+
+    Only the part before the em dash is considered, because the article body
+    frequently repeats an issue reference of its own ('PRAVO I POREZI, br.
+    11/24') and matching on that would produce false hits.
+    """
+    if not text:
+        return None
+    head = text.split("—")[0]
+
+    m = _ISSUE_RE.search(head) or re.search(r"(\d+)\s*/\s*(\d{4})", head)
+    if not m:
+        return None
+    issue, year = int(m.group(1)), int(m.group(2))
+
+    low = head.lower()
+    pub = "PiP" if ("pip" in low or "pravo i porezi" in low
+                    or "porezno i pravno" in low) else "RRiF"
+    return (pub, issue, year)
+
+
+# ---------------------------------------------------------------------------
 # Helpers
 # ---------------------------------------------------------------------------
 
@@ -147,18 +184,39 @@ def evaluate_one(item: dict, *, skip_generation: bool, enable_rewrite: bool) -> 
     category_correct = expected_cat is not None and actual_cat == expected_cat
 
     expected = item["expected_articles"]
+    expected_sources = item.get("expected_sources") or []
     in_corpus = item["in_corpus"]
-    # A question can only be graded on article-level retrieval if we know
-    # which article is right. 31 of 41 do not, and pretending otherwise is
-    # what produced the 16.2% ceiling.
-    gradeable_retrieval = bool(in_corpus and expected)
 
-    # ── Retrieval, graded on what retrieval returned ────────────────────────
+    # Two independent ways to grade retrieval, because the corpus has two
+    # kinds of content and they are identified differently:
+    #
+    #   law questions      → article number, on `zakon` chunks only
+    #   magazine questions → publication issue, from `source`
+    #
+    # Most of the corpus (12,561 of 12,749) is magazine, so the second one is
+    # what actually measures the product.
+    gradeable_retrieval = bool(in_corpus and expected)
+    gradeable_source = bool(in_corpus and expected_sources)
+
+    # ── Article grading — statute only ──────────────────────────────────────
+    # `article_number` on a magazine chunk is a chunk position (2, 3, 4…),
+    # not an article of a law, so including them here produces false hits
+    # against expected values like ["38"]. The real magazine article number
+    # lives in extra_metadata.article_num.
     retrieved_articles = [
         _extract_article_number(m.get("article_number"))
         for m in result.retrieved_meta
+        if m.get("source_type") != "članak"
     ]
     retrieved_articles = [a for a in retrieved_articles if a]
+
+    # Kept for diagnostics — what the old, collision-prone grading saw.
+    retrieved_articles_any = [
+        a for a in (
+            _extract_article_number(m.get("article_number"))
+            for m in result.retrieved_meta
+        ) if a
+    ]
 
     if gradeable_retrieval:
         retrieval_top_1 = bool(retrieved_articles) and retrieved_articles[0] in expected
@@ -166,6 +224,17 @@ def evaluate_one(item: dict, *, skip_generation: bool, enable_rewrite: bool) -> 
     else:
         retrieval_top_1 = None
         retrieval_top_k = None
+
+    # ── Source grading — magazine content ───────────────────────────────────
+    expected_keys = {k for k in (_parse_source_key(s) for s in expected_sources) if k}
+    retrieved_keys = [_parse_source_key(m.get("source")) for m in result.retrieved_meta]
+
+    if gradeable_source and expected_keys:
+        source_top_1 = bool(retrieved_keys) and retrieved_keys[0] in expected_keys
+        source_top_k = any(k in expected_keys for k in retrieved_keys)
+    else:
+        source_top_1 = None
+        source_top_k = None
 
     # ── Same thing graded on citations, kept for comparison ─────────────────
     citation_articles = [
@@ -218,7 +287,12 @@ def evaluate_one(item: dict, *, skip_generation: bool, enable_rewrite: bool) -> 
     # from failing it. Ungradeable questions are excluded from the rate
     # rather than silently counted as passes.
     if skip_generation:
-        passed = retrieval_top_1 if gradeable_retrieval else None
+        if gradeable_retrieval:
+            passed = retrieval_top_1
+        elif gradeable_source:
+            passed = source_top_1
+        else:
+            passed = None
     else:
         if not in_corpus:
             passed = refusal_correct
@@ -239,11 +313,19 @@ def evaluate_one(item: dict, *, skip_generation: bool, enable_rewrite: bool) -> 
         "query": item["query"],
         "in_corpus": in_corpus,
         "gradeable_retrieval": gradeable_retrieval,
+        "gradeable_source": gradeable_source,
         "expected_articles": expected,
+        "expected_sources": expected_sources,
         "retrieved_articles": retrieved_articles,
+        "retrieved_articles_any": retrieved_articles_any,
+        "retrieved_sources": [
+            f"{k[0]} {k[1]}/{k[2]}" if k else None for k in retrieved_keys
+        ],
         "retrieved_meta": result.retrieved_meta,
         "retrieval_top_1": retrieval_top_1,
         "retrieval_top_k": retrieval_top_k,
+        "source_top_1": source_top_1,
+        "source_top_k": source_top_k,
         "citation_articles": citation_articles,
         "citation_top_1": citation_top_1,
         "citation_top_k": citation_top_k,
@@ -276,6 +358,7 @@ def aggregate(per_question: list[dict]) -> dict:
     in_corpus = [r for r in per_question if r["in_corpus"]]
     traps = [r for r in per_question if not r["in_corpus"]]
     gradeable = [r for r in per_question if r["gradeable_retrieval"]]
+    src_gradeable = [r for r in per_question if r["gradeable_source"]]
     judged = [r for r in per_question if r["passed"] is not None]
     has_generation = any(r["refusal_correct"] is not None for r in per_question)
 
@@ -288,6 +371,10 @@ def aggregate(per_question: list[dict]) -> dict:
         "n_gradeable_retrieval": len(gradeable),
         "retrieval_top_1": _mean([r["retrieval_top_1"] for r in gradeable]),
         "retrieval_top_k": _mean([r["retrieval_top_k"] for r in gradeable]),
+        # Magazine content — the 98.5% of the corpus the product is built on.
+        "n_gradeable_source": len(src_gradeable),
+        "source_top_1": _mean([r["source_top_1"] for r in src_gradeable]),
+        "source_top_k": _mean([r["source_top_k"] for r in src_gradeable]),
         # Old-style number, for comparison with historical runs.
         "citation_top_1": _mean([r["citation_top_1"] for r in gradeable]),
         "citation_top_k": _mean([r["citation_top_k"] for r in gradeable]),
@@ -384,10 +471,14 @@ def main():
 
             bits = [f"cat: {result.get('actual_category')}"]
             if result["gradeable_retrieval"]:
-                bits.append(f"want {result['expected_articles']}")
+                bits.append(f"want čl. {result['expected_articles']}")
                 bits.append(f"got {result['retrieved_articles'][:3]}")
+            elif result["gradeable_source"]:
+                bits.append(f"want {result['expected_sources']}")
+                got = [s for s in result["retrieved_sources"][:3] if s]
+                bits.append(f"got {got}")
             else:
-                bits.append(f"got {result['retrieved_articles'][:3]} (not graded)")
+                bits.append(f"got {result['retrieved_articles_any'][:3]} (not graded)")
             if result["top_rerank_score"] is not None:
                 bits.append(f"score={result['top_rerank_score']:.3f}")
             if result.get("expected_category") and not result.get("category_correct"):
@@ -411,8 +502,11 @@ def main():
     print("=" * 70)
     print("Summary")
     print("=" * 70)
-    print(f"  Retrieval top-1 (reranked):    {_pct(metrics['retrieval_top_1'], ng)}")
-    print(f"  Retrieval top-{5} (reranked):    {_pct(metrics['retrieval_top_k'], ng)}")
+    ns = metrics["n_gradeable_source"]
+    print(f"  ČLANCI  source top-1:          {_pct(metrics['source_top_1'], ns)}")
+    print(f"  ČLANCI  source top-5:          {_pct(metrics['source_top_k'], ns)}")
+    print(f"  ZAKONI  article top-1:         {_pct(metrics['retrieval_top_1'], ng)}")
+    print(f"  ZAKONI  article top-5:         {_pct(metrics['retrieval_top_k'], ng)}")
     if metrics["citation_top_1"] is not None:
         print(f"  — via citations (old metric):  {_pct(metrics['citation_top_1'], ng)}")
     if "classifier_accuracy" in metrics:
@@ -428,9 +522,14 @@ def main():
         print(f"  Total cost (this run):         ${metrics['total_cost_usd']:.5f}")
 
     print()
-    print(f"  Note: {ng} of {metrics['n_questions']} questions have expected_articles")
-    print(f"        and can be graded on retrieval. One question = "
-          f"{100/ng:.1f} points." if ng else "")
+    if ns:
+        print(f"  Note: {ns} magazine questions graded on publication issue "
+              f"(one = {100/ns:.1f} points).")
+    if ng:
+        print(f"        {ng} law questions graded on article number "
+              f"(one = {100/ng:.1f} points).")
+    print(f"        {metrics['n_questions'] - ns - ng} questions have no "
+          f"ground truth and are not graded.")
     if metrics["n_year_like_articles"]:
         print(f"  Note: {metrics['n_year_like_articles']} retrieved article_number values "
               f"look like years — magazine chunks storing a publication year "
