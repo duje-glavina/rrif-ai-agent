@@ -477,6 +477,12 @@ def _meta(top_chunks: list[tuple], scores: dict) -> list[dict]:
             "source_type":    row[6],
             "status":         row[8] if len(row) > 8 else None,
             "rerank_score":   scores.get(str(row[0])),
+            # Carried so the eval can check whether a retrieved chunk actually
+            # contains the expected answer. Publication-issue matching turned
+            # out to be the wrong instrument: recurring figures like the 2024
+            # minimum wage appear across eleven issues of the same year, so
+            # "which issue" has no single right answer.
+            "chunk_text":     row[1],
         }
         for row in top_chunks
     ]

@@ -240,7 +240,39 @@ def evaluate_one(item: dict, *, skip_generation: bool, enable_rewrite: bool) -> 
         retrieval_top_1 = None
         retrieval_top_k = None
 
-    # ── Source grading — magazine content ───────────────────────────────────
+    # ── Content grading — does a retrieved chunk contain the answer? ────────
+    # The primary magazine metric. Issue-level matching proved too coarse:
+    # the 2024 minimum wage figure appears in eleven of that year's twelve
+    # issues, so "the right issue" is not well defined. What is well defined
+    # is whether retrieval put the answer in front of the generator.
+    #
+    # `_all` is strict (every expected keyword present in one chunk); `_any`
+    # is the loose floor. The gap between them is usually a keyword list that
+    # is too demanding rather than a retrieval failure, so both are reported.
+    keywords = [k for k in (item.get("expected_keywords") or []) if k]
+    gradeable_content = bool(in_corpus and keywords)
+
+    def _text(m: dict) -> str:
+        return (m.get("chunk_text") or "").lower()
+
+    def _has_all(m: dict) -> bool:
+        t = _text(m)
+        return all(k.lower() in t for k in keywords)
+
+    def _has_any(m: dict) -> bool:
+        t = _text(m)
+        return any(k.lower() in t for k in keywords)
+
+    if gradeable_content and result.retrieved_meta:
+        content_top_1 = _has_all(result.retrieved_meta[0])
+        content_top_k = any(_has_all(m) for m in result.retrieved_meta)
+        content_any_top_k = any(_has_any(m) for m in result.retrieved_meta)
+    elif gradeable_content:
+        content_top_1 = content_top_k = content_any_top_k = False
+    else:
+        content_top_1 = content_top_k = content_any_top_k = None
+
+    # ── Source grading — magazine content, secondary ────────────────────────
     expected_keys = {k for k in (_parse_source_key(s) for s in expected_sources) if k}
     retrieved_keys = [_parse_source_key(m.get("source")) for m in result.retrieved_meta]
 
@@ -304,8 +336,8 @@ def evaluate_one(item: dict, *, skip_generation: bool, enable_rewrite: bool) -> 
     if skip_generation:
         if gradeable_retrieval:
             passed = retrieval_top_1
-        elif gradeable_source:
-            passed = source_top_1
+        elif gradeable_content:
+            passed = content_top_k
         else:
             passed = None
     else:
@@ -329,6 +361,10 @@ def evaluate_one(item: dict, *, skip_generation: bool, enable_rewrite: bool) -> 
         "in_corpus": in_corpus,
         "gradeable_retrieval": gradeable_retrieval,
         "gradeable_source": gradeable_source,
+        "gradeable_content": gradeable_content,
+        "content_top_1": content_top_1,
+        "content_top_k": content_top_k,
+        "content_any_top_k": content_any_top_k,
         "expected_articles": expected,
         "expected_sources": expected_sources,
         "retrieved_articles": retrieved_articles,
@@ -374,6 +410,7 @@ def aggregate(per_question: list[dict]) -> dict:
     traps = [r for r in per_question if not r["in_corpus"]]
     gradeable = [r for r in per_question if r["gradeable_retrieval"]]
     src_gradeable = [r for r in per_question if r["gradeable_source"]]
+    con_gradeable = [r for r in per_question if r["gradeable_content"]]
     judged = [r for r in per_question if r["passed"] is not None]
     has_generation = any(r["refusal_correct"] is not None for r in per_question)
 
@@ -386,7 +423,12 @@ def aggregate(per_question: list[dict]) -> dict:
         "n_gradeable_retrieval": len(gradeable),
         "retrieval_top_1": _mean([r["retrieval_top_1"] for r in gradeable]),
         "retrieval_top_k": _mean([r["retrieval_top_k"] for r in gradeable]),
-        # Magazine content — the 98.5% of the corpus the product is built on.
+        # Primary magazine metric: did retrieval surface the answer at all.
+        "n_gradeable_content": len(con_gradeable),
+        "content_top_1": _mean([r["content_top_1"] for r in con_gradeable]),
+        "content_top_k": _mean([r["content_top_k"] for r in con_gradeable]),
+        "content_any_top_k": _mean([r["content_any_top_k"] for r in con_gradeable]),
+        # Secondary, and coarse — see the comment in evaluate_one.
         "n_gradeable_source": len(src_gradeable),
         "source_top_1": _mean([r["source_top_1"] for r in src_gradeable]),
         "source_top_k": _mean([r["source_top_k"] for r in src_gradeable]),
@@ -518,6 +560,11 @@ def main():
     print("Summary")
     print("=" * 70)
     ns = metrics["n_gradeable_source"]
+    nc = metrics["n_gradeable_content"]
+    print(f"  ODGOVOR u top-1 chunku:        {_pct(metrics['content_top_1'], nc)}")
+    print(f"  ODGOVOR u top-5:               {_pct(metrics['content_top_k'], nc)}")
+    print(f"    (bar jedan pojam, top-5):    {_pct(metrics['content_any_top_k'], nc)}")
+    print()
     print(f"  ČLANCI  source top-1:          {_pct(metrics['source_top_1'], ns)}")
     print(f"  ČLANCI  source top-5:          {_pct(metrics['source_top_k'], ns)}")
     print(f"  ZAKONI  article top-1:         {_pct(metrics['retrieval_top_1'], ng)}")
