@@ -16,9 +16,10 @@ Pick the backend explicitly when it matters:
     STEM_BACKEND=crude   python scripts/exp_stem_corpus.py    # fast, laptop
     STEM_BACKEND=classla python scripts/exp_stem_corpus.py    # real, on the GPU box
 
-After this, wire up the query side — see NOTE at the bottom. Indexing the
-corpus without stemming the query produces a silently broken comparison
-rather than an error.
+The query side is already wired: rag/query.py reads FTS_CONFIG=simple|stem and
+puts the question through the same normaliser. Use the same STEM_BACKEND for
+both — mismatched vocabularies collapse lexical recall without raising
+anything.
 """
 from __future__ import annotations
 
@@ -175,25 +176,20 @@ if __name__ == "__main__":
     main()
 
 
-# ── NOTE: the query-side change ───────────────────────────────────────────────
+# ── NOTE: verify the index is actually used ───────────────────────────────────
 #
-# In rag/retrieve/hybrid.py the FTS branch currently reads:
+# The query side lives in rag/query.py: FTS_CONFIG picks the column, and
+# _build_tsquery runs stem_query() over the question when it is set to 'stem'.
+# The column name is interpolated into the SQL string, not bound, because the
+# planner only matches an index expression against a constant.
 #
-#     to_tsvector('simple', chunk_text) @@ to_tsquery('simple', %s)
+# Before trusting any number this produces, confirm the GIN index is hit:
 #
-# Add a mode switch. Interpolate the column name into the SQL string rather
-# than binding it as a parameter — the planner needs a constant to match the
-# index expression, and a bound parameter silently costs you the index:
+#   EXPLAIN (ANALYZE, BUFFERS)
+#   SELECT id FROM chunks
+#   WHERE to_tsvector('simple', chunk_text_stem)
+#         @@ to_tsquery('simple', 'stop | pdv');
 #
-#     FTS_MODE = os.getenv("FTS_CONFIG", "simple")     # simple | stem
-#     if FTS_MODE not in {"simple", "stem"}:
-#         raise ValueError(f"unknown FTS_CONFIG: {FTS_MODE}")
-#     TEXT_COL = "chunk_text_stem" if FTS_MODE == "stem" else "chunk_text"
-#
-# then f-string TEXT_COL into the query, and in _build_tsquery apply
-# stem_query() to the question before tokenising when FTS_MODE == "stem".
-#
-# Use the same STEM_BACKEND at query time as you did at index time.
-#
-# Verify with EXPLAIN that you get a Bitmap Index Scan, not a Seq Scan,
-# before trusting any number this produces.
+# You want "Bitmap Index Scan on idx_chunks_fts_stem". A Seq Scan means the
+# expression doesn't match the index — usually a cast difference — and at 12k
+# rows it will still be fast enough that nothing looks wrong.

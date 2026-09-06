@@ -62,6 +62,11 @@ EXPERIMENT HOOKS (all default to production behaviour)
 
   RETRIEVAL_MODE=tight|domain|wide   skip straight to a filter level
   TEMPORAL_MODE=strict|legacy        see fix 2
+  FTS_CONFIG=simple|stem             lexical branch reads chunk_text (raw) or
+                                     chunk_text_stem (lemmatised); the question
+                                     is put through the same normaliser
+  STEM_BACKEND=crude|classla|auto    which normaliser (see rag/stem_hr.py) —
+                                     must match what the column was built with
   ask(..., skip_generation=True)     stop after reranking, no Sonnet call
 """
 from __future__ import annotations
@@ -105,6 +110,18 @@ TEMPORAL_MODE = os.getenv("TEMPORAL_MODE", "strict").lower()
 if TEMPORAL_MODE not in {"strict", "legacy"}:
     raise ValueError(f"TEMPORAL_MODE must be strict|legacy, got {TEMPORAL_MODE!r}")
 
+# Route B of the FTS experiment. The column name is interpolated into the SQL
+# string rather than bound as a parameter on purpose: the GIN index is built on
+# the expression to_tsvector('simple', chunk_text_stem), and the planner only
+# matches an index expression against a constant. A bound parameter would parse
+# fine and silently cost the index — a sequential scan over 12k rows is fast
+# enough that you would never notice, and you would benchmark the wrong thing.
+FTS_CONFIG = os.getenv("FTS_CONFIG", "simple").lower()
+if FTS_CONFIG not in {"simple", "stem"}:
+    raise ValueError(f"FTS_CONFIG must be simple|stem, got {FTS_CONFIG!r}")
+
+FTS_TEXT_COL = "chunk_text_stem" if FTS_CONFIG == "stem" else "chunk_text"
+
 
 # ── Connection pool ───────────────────────────────────────────────────────────
 
@@ -127,7 +144,36 @@ def _pool() -> ConnectionPool:
             configure=register_vector,
             open=True,
         )
+        _check_fts_column(_POOL)
     return _POOL
+
+
+def _check_fts_column(pool: ConnectionPool) -> None:
+    """Fail loudly at startup if FTS_CONFIG=stem has nothing to read.
+
+    Without this, a half-populated chunk_text_stem produces a perfectly valid
+    query that simply matches less, and the experiment reports "stemming made
+    retrieval worse" when what it measured was an unfinished backfill.
+    """
+    if FTS_CONFIG != "stem":
+        return
+    with pool.connection() as conn, conn.cursor() as cur:
+        cur.execute(
+            "SELECT count(*) FROM information_schema.columns "
+            "WHERE table_name = 'chunks' AND column_name = 'chunk_text_stem'"
+        )
+        if cur.fetchone()[0] == 0:
+            raise RuntimeError(
+                "FTS_CONFIG=stem but chunks.chunk_text_stem does not exist. "
+                "Run: python scripts/exp_stem_corpus.py"
+            )
+        cur.execute("SELECT count(*) FROM chunks WHERE chunk_text_stem IS NULL")
+        missing = cur.fetchone()[0]
+        if missing:
+            raise RuntimeError(
+                f"FTS_CONFIG=stem but {missing:,} rows have a NULL chunk_text_stem. "
+                "Finish the backfill before measuring: python scripts/exp_stem_corpus.py"
+            )
 
 
 def close_pool() -> None:
@@ -201,6 +247,7 @@ class QueryResponse:
                 "rewrite_changed": self.rewrite_changed,
                 "retrieval_mode": RETRIEVAL_MODE,
                 "temporal_mode": TEMPORAL_MODE,
+                "fts_config": FTS_CONFIG,
                 "n_rerank_calls": self.n_rerank_calls,
                 "generation_skipped": self.generation_skipped,
             },
@@ -223,7 +270,18 @@ def _build_tsquery(question: str) -> str | None:
 
     OR rather than AND is deliberate: recall first, then let RRF and the
     reranker sort it out.
+
+    Under FTS_CONFIG=stem the question goes through the same normaliser the
+    column was built with. Skipping this step is the failure mode worth
+    guarding against: indexed lemmas versus inflected query tokens still runs,
+    still returns rows, and just quietly matches far fewer of them.
     """
+    if FTS_CONFIG == "stem":
+        # Imported here rather than at module scope so the default path never
+        # pays for classla's import (and never fails if it isn't installed).
+        from rag.stem_hr import stem_query
+        question = stem_query(question)
+
     words = [w for w in _WORD_RE.findall(question) if len(w) >= 3]
     return " | ".join(words) if words else None
 
@@ -306,11 +364,11 @@ def _hybrid_search(
             SELECT id, row_number() OVER (ORDER BY score DESC) AS rnk
             FROM (
                 SELECT id,
-                       ts_rank_cd(to_tsvector('simple', chunk_text),
+                       ts_rank_cd(to_tsvector('simple', {FTS_TEXT_COL}),
                                   to_tsquery('simple', %(tsq)s)) AS score
                 FROM chunks
                 WHERE {where}
-                  AND to_tsvector('simple', chunk_text)
+                  AND to_tsvector('simple', {FTS_TEXT_COL})
                       @@ to_tsquery('simple', %(tsq)s)
                 ORDER BY score DESC
                 LIMIT %(pool)s
@@ -525,7 +583,7 @@ def ask(
     if verbose:
         print(f"[retrieval] {len(top_chunks)} chunks "
               f"(mode={RETRIEVAL_MODE}, temporal={TEMPORAL_MODE}, "
-              f"rerank_calls={n_calls})")
+              f"fts={FTS_CONFIG}, rerank_calls={n_calls})")
 
     if not top_chunks:
         from datetime import date as _date
