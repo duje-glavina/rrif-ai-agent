@@ -408,6 +408,11 @@ def evaluate_one(item: dict, *, skip_generation: bool, enable_rewrite: bool) -> 
         "content_top_1_exact": content_top_1_exact,
         "content_top_k_exact": content_top_k_exact,
         "content_any_top_k_exact": content_any_top_k_exact,
+        # F1 covers the magazine (članci). The six PDV-law questions are the
+        # only ones with a non-empty expected_articles, so that field is also
+        # the scope marker — and the F1 number must not be dragged down by
+        # questions that are out of F1 scope by agreement.
+        "scope": "zakon" if expected else "članak",
         "expected_articles": expected,
         "expected_sources": expected_sources,
         "retrieved_articles": retrieved_articles,
@@ -454,6 +459,8 @@ def aggregate(per_question: list[dict]) -> dict:
     gradeable = [r for r in per_question if r["gradeable_retrieval"]]
     src_gradeable = [r for r in per_question if r["gradeable_source"]]
     con_gradeable = [r for r in per_question if r["gradeable_content"]]
+    con_clanci = [r for r in con_gradeable if r.get("scope") != "zakon"]
+    con_zakoni = [r for r in con_gradeable if r.get("scope") == "zakon"]
     judged = [r for r in per_question if r["passed"] is not None]
     has_generation = any(r["refusal_correct"] is not None for r in per_question)
 
@@ -471,6 +478,15 @@ def aggregate(per_question: list[dict]) -> dict:
         "content_top_1": _mean([r["content_top_1"] for r in con_gradeable]),
         "content_top_k": _mean([r["content_top_k"] for r in con_gradeable]),
         "content_any_top_k": _mean([r["content_any_top_k"] for r in con_gradeable]),
+        # Split by scope. ČLANCI is the F1 number; ZAKONI is tracked but out
+        # of F1 scope until the law question in the TehSpec is settled.
+        "n_content_clanci": len(con_clanci),
+        "content_top_1_clanci": _mean([r["content_top_1"] for r in con_clanci]),
+        "content_top_k_clanci": _mean([r["content_top_k"] for r in con_clanci]),
+        "content_any_top_k_clanci": _mean([r["content_any_top_k"] for r in con_clanci]),
+        "n_content_zakoni": len(con_zakoni),
+        "content_top_1_zakoni": _mean([r["content_top_1"] for r in con_zakoni]),
+        "content_top_k_zakoni": _mean([r["content_top_k"] for r in con_zakoni]),
         # Old exact-substring definition, kept so pre-6-Sep runs stay readable.
         "content_top_1_exact": _mean([r.get("content_top_1_exact") for r in con_gradeable]),
         "content_top_k_exact": _mean([r.get("content_top_k_exact") for r in con_gradeable]),
@@ -608,8 +624,17 @@ def main():
     print("=" * 70)
     ns = metrics["n_gradeable_source"]
     nc = metrics["n_gradeable_content"]
-    print(f"  ODGOVOR u top-1 chunku:        {_pct(metrics['content_top_1'], nc)}")
-    print(f"  ODGOVOR u top-5:               {_pct(metrics['content_top_k'], nc)}")
+    ncl = metrics["n_content_clanci"]
+    nzk = metrics["n_content_zakoni"]
+    print(f"  ČLANCI  odgovor u top-1:       {_pct(metrics['content_top_1_clanci'], ncl)}   ← F1")
+    print(f"  ČLANCI  odgovor u top-5:       {_pct(metrics['content_top_k_clanci'], ncl)}   ← F1")
+    print(f"    (bar jedan pojam, top-5):    {_pct(metrics['content_any_top_k_clanci'], ncl)}")
+    print()
+    print(f"  ZAKONI  odgovor u top-1:       {_pct(metrics['content_top_1_zakoni'], nzk)}   (izvan F1)")
+    print(f"  ZAKONI  odgovor u top-5:       {_pct(metrics['content_top_k_zakoni'], nzk)}   (izvan F1)")
+    print()
+    print(f"  SVE     odgovor u top-1:       {_pct(metrics['content_top_1'], nc)}")
+    print(f"  SVE     odgovor u top-5:       {_pct(metrics['content_top_k'], nc)}")
     print(f"    (bar jedan pojam, top-5):    {_pct(metrics['content_any_top_k'], nc)}")
     print(f"    [staro, doslovno]:           "
           f"{_pct(metrics['content_top_1_exact'])} / "
@@ -636,7 +661,10 @@ def main():
 
     print()
     if nc:
-        print(f"  Note: {nc} questions graded on answer content "
+        print(f"  Note: F1 covers članci. {ncl} of the {nc} content-graded "
+              f"questions are članci (one = {100/ncl:.1f} points); the other "
+              f"{nzk} are PDV-law questions, tracked separately.")
+        print(f"        {nc} questions graded on answer content "
               f"(one = {100/nc:.1f} points) — this is the primary number.")
     if ns:
         print(f"        {ns} of those also graded on publication issue "
