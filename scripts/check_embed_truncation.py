@@ -22,9 +22,16 @@ from __future__ import annotations
 
 import argparse
 import os
+import sys
+from pathlib import Path
 
 import psycopg
 from dotenv import load_dotenv
+
+# Run as `python scripts/check_embed_truncation.py` from the project root, the
+# same way the other scripts here are run — which puts scripts/ on sys.path,
+# not the project root, so `rag` is not importable without this.
+sys.path.insert(0, str(Path(__file__).parent.parent))
 
 load_dotenv()
 
