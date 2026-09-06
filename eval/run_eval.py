@@ -64,6 +64,7 @@ import yaml
 
 sys.path.insert(0, str(Path(__file__).parent.parent))
 from rag.query import ask
+from rag.stem_hr import stem_text_crude
 
 
 GOLDEN_SET_PATH = Path("eval/golden_set.yaml")
@@ -249,6 +250,19 @@ def evaluate_one(item: dict, *, skip_generation: bool, enable_rewrite: bool) -> 
     # `_all` is strict (every expected keyword present in one chunk); `_any`
     # is the loose floor. The gap between them is usually a keyword list that
     # is too demanding rather than a retrieval failure, so both are reported.
+    #
+    # MORPHOLOGY. Exact substring matching compares a nominative-singular
+    # keyword against running Croatian, which inflects everything. The golden
+    # set says "reprezentacija", the corpus says "reprezentacije"; the golden
+    # set says "glavna knjiga", the corpus says "glavnu knjigu". Five of the
+    # seven questions in the top-5 gap were this and nothing else -- chunks
+    # that plainly answered the question, scored as misses.
+    #
+    # So both sides are stemmed before comparison, and both numbers are kept:
+    # `content_*` is the morphology-aware metric and the one to read;
+    # `content_*_exact` preserves the old definition so runs from before this
+    # change stay comparable. Deliberately the crude backend, pinned, so the
+    # metric cannot shift with whatever happens to be installed locally.
     keywords = [k for k in (item.get("expected_keywords") or []) if k]
     gradeable_content = bool(in_corpus and keywords)
 
@@ -264,27 +278,39 @@ def evaluate_one(item: dict, *, skip_generation: bool, enable_rewrite: bool) -> 
         s = re.sub(r"\s+", " ", s)
         return re.sub(r"\s+%", "%", s)
 
-    def _text(m: dict) -> str:
-        return _norm(m.get("chunk_text") or "")
+    def _fold(s: str) -> str:
+        """_norm, then strip Croatian inflection from both sides equally."""
+        return stem_text_crude(_norm(s))
 
-    _kw = [_norm(k) for k in keywords]
+    _kw_exact = [_norm(k) for k in keywords]
+    _kw_fold = [_fold(k) for k in keywords]
 
-    def _has_all(m: dict) -> bool:
-        t = _text(m)
-        return all(k in t for k in _kw)
+    def _all_hits(texts: list[str], kws: list[str]) -> list[bool]:
+        return [all(k in t for k in kws) for t in texts]
 
-    def _has_any(m: dict) -> bool:
-        t = _text(m)
-        return any(k in t for k in _kw)
+    def _any_hits(texts: list[str], kws: list[str]) -> list[bool]:
+        return [any(k in t for k in kws) for t in texts]
 
     if gradeable_content and result.retrieved_meta:
-        content_top_1 = _has_all(result.retrieved_meta[0])
-        content_top_k = any(_has_all(m) for m in result.retrieved_meta)
-        content_any_top_k = any(_has_any(m) for m in result.retrieved_meta)
+        _exact_texts = [_norm(m.get("chunk_text") or "") for m in result.retrieved_meta]
+        _fold_texts = [stem_text_crude(x) for x in _exact_texts]
+
+        _ex_all = _all_hits(_exact_texts, _kw_exact)
+        _fo_all = _all_hits(_fold_texts, _kw_fold)
+
+        content_top_1 = _fo_all[0]
+        content_top_k = any(_fo_all)
+        content_any_top_k = any(_any_hits(_fold_texts, _kw_fold))
+
+        content_top_1_exact = _ex_all[0]
+        content_top_k_exact = any(_ex_all)
+        content_any_top_k_exact = any(_any_hits(_exact_texts, _kw_exact))
     elif gradeable_content:
         content_top_1 = content_top_k = content_any_top_k = False
+        content_top_1_exact = content_top_k_exact = content_any_top_k_exact = False
     else:
         content_top_1 = content_top_k = content_any_top_k = None
+        content_top_1_exact = content_top_k_exact = content_any_top_k_exact = None
 
     # ── Source grading — magazine content, secondary ────────────────────────
     expected_keys = {k for k in (_parse_source_key(s) for s in expected_sources) if k}
@@ -379,6 +405,9 @@ def evaluate_one(item: dict, *, skip_generation: bool, enable_rewrite: bool) -> 
         "content_top_1": content_top_1,
         "content_top_k": content_top_k,
         "content_any_top_k": content_any_top_k,
+        "content_top_1_exact": content_top_1_exact,
+        "content_top_k_exact": content_top_k_exact,
+        "content_any_top_k_exact": content_any_top_k_exact,
         "expected_articles": expected,
         "expected_sources": expected_sources,
         "retrieved_articles": retrieved_articles,
@@ -442,6 +471,10 @@ def aggregate(per_question: list[dict]) -> dict:
         "content_top_1": _mean([r["content_top_1"] for r in con_gradeable]),
         "content_top_k": _mean([r["content_top_k"] for r in con_gradeable]),
         "content_any_top_k": _mean([r["content_any_top_k"] for r in con_gradeable]),
+        # Old exact-substring definition, kept so pre-6-Sep runs stay readable.
+        "content_top_1_exact": _mean([r.get("content_top_1_exact") for r in con_gradeable]),
+        "content_top_k_exact": _mean([r.get("content_top_k_exact") for r in con_gradeable]),
+        "content_any_top_k_exact": _mean([r.get("content_any_top_k_exact") for r in con_gradeable]),
         # Secondary, and coarse — see the comment in evaluate_one.
         "n_gradeable_source": len(src_gradeable),
         "source_top_1": _mean([r["source_top_1"] for r in src_gradeable]),
@@ -578,6 +611,10 @@ def main():
     print(f"  ODGOVOR u top-1 chunku:        {_pct(metrics['content_top_1'], nc)}")
     print(f"  ODGOVOR u top-5:               {_pct(metrics['content_top_k'], nc)}")
     print(f"    (bar jedan pojam, top-5):    {_pct(metrics['content_any_top_k'], nc)}")
+    print(f"    [staro, doslovno]:           "
+          f"{_pct(metrics['content_top_1_exact'])} / "
+          f"{_pct(metrics['content_top_k_exact'])} / "
+          f"{_pct(metrics['content_any_top_k_exact'])}")
     print()
     print(f"  ČLANCI  source top-1:          {_pct(metrics['source_top_1'], ns)}")
     print(f"  ČLANCI  source top-5:          {_pct(metrics['source_top_k'], ns)}")

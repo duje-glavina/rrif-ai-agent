@@ -141,6 +141,17 @@ def stem_query(text: str) -> str:
     return stem_text(text)
 
 
+def stem_text_crude(text: str) -> str:
+    """Always the crude backend, whatever STEM_BACKEND says.
+
+    The eval grader uses this to normalise keywords and chunk text before
+    comparing them. It must not depend on whether classla happens to be
+    installed on the machine running the eval — a metric that changes with
+    the local environment is not a metric.
+    """
+    return _crude_stem_text(text or "")
+
+
 def stem_many(texts: Iterable[str]) -> list[str]:
     """Batch variant.
 
