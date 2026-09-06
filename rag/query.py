@@ -333,6 +333,14 @@ def _hybrid_search(
     Each branch is limited BEFORE numbering, so the vector branch still uses
     the HNSW index and the FTS branch still uses the GIN index; row_number()
     then runs over 50 rows rather than the whole table.
+
+    Every ORDER BY that can tie carries `id` as a final key. Without it ties
+    are broken by physical row order, which changes whenever the table is
+    rewritten — adding a column and backfilling it moved two questions in the
+    eval with no code change at all. Re-ingesting the corpus would do the same.
+    The one exception is the vector branch's inner ORDER BY: pgvector only
+    uses the HNSW index when the ordering is exactly the distance expression,
+    so that one stays bare and the window function below adds the tiebreak.
     """
     params: dict = {}
     where = _build_where(domain, subdomains, sql_time, params)
@@ -347,7 +355,7 @@ def _hybrid_search(
 
     vec_cte = f"""
         vec AS (
-            SELECT id, row_number() OVER (ORDER BY dist) AS rnk
+            SELECT id, row_number() OVER (ORDER BY dist, id) AS rnk
             FROM (
                 SELECT id, embedding <=> %(qvec)s AS dist
                 FROM chunks
@@ -361,7 +369,7 @@ def _hybrid_search(
         params["tsq"] = tsq
         fts_cte = f""",
         fts AS (
-            SELECT id, row_number() OVER (ORDER BY score DESC) AS rnk
+            SELECT id, row_number() OVER (ORDER BY score DESC, id) AS rnk
             FROM (
                 SELECT id,
                        ts_rank_cd(to_tsvector('simple', {FTS_TEXT_COL}),
@@ -370,7 +378,7 @@ def _hybrid_search(
                 WHERE {where}
                   AND to_tsvector('simple', {FTS_TEXT_COL})
                       @@ to_tsquery('simple', %(tsq)s)
-                ORDER BY score DESC
+                ORDER BY score DESC, id
                 LIMIT %(pool)s
             ) t
         )"""
@@ -393,7 +401,7 @@ def _hybrid_search(
         WITH {vec_cte}{fts_cte},{fused}
         SELECT {_SELECT_COLS}
         FROM fused fu JOIN chunks c ON c.id = fu.id
-        ORDER BY fu.rrf DESC
+        ORDER BY fu.rrf DESC, c.id
         LIMIT %(candidates)s
     """
 
@@ -444,10 +452,12 @@ def _retrieve_and_rank(question: str, clf: ClassifierResult) -> tuple[list[tuple
         if not pool:
             continue
 
+        # chunk_id as a secondary key for the same reason as in the SQL: equal
+        # rerank scores must not be ordered by whatever sequence the rows
+        # happened to arrive in.
         ordered = sorted(
             pool.values(),
-            key=lambda r: scores.get(str(r[0]), 0.0),
-            reverse=True,
+            key=lambda r: (-scores.get(str(r[0]), 0.0), str(r[0])),
         )
         best = scores.get(str(ordered[0][0]), 0.0)
 
