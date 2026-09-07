@@ -24,13 +24,23 @@ META = SourceMetadata(
     source="Zakon o porezu na dodanu vrijednost, NN 73/2013, čl. ...",
     law_name="Zakon o porezu na dodanu vrijednost",
     nn_reference="NN 73/2013",
-    # Original 2013 text. As of today the version in force has been amended
-    # many times — we'll handle consolidated text + amendments in a later ADR.
-    # For this initial ingestion we mark this version as historical so it
-    # doesn't surface for "current law" queries.
+    # NN 73/2013 is the base Zakon o PDV-u and is still in force, amended.
+    # Marking it `nevazeci` (as this script did until 7 Sep 2026) makes every
+    # law chunk invisible to `status = 'vazeci'`, which is what TEMPORAL_MODE
+    # applies to statute — so all 188 chunks dropped out of every current-state
+    # question and ZAKONI article top-5 read 0.0%.
+    #
+    # scripts/fix_pdv_status.py existed to undo this after the fact. A two-step
+    # ingest whose second step is optional is a step that gets forgotten: it
+    # was, on the v2 corpus, and cost a full evaluation round to find. The
+    # status is now correct at write time and that script is redundant.
+    #
+    # When consolidated texts and amendments arrive in F2, this becomes a real
+    # versioning problem and valid_from/valid_to earn their keep. Until then a
+    # single base law in force is what the row should say.
     valid_from=date(2013, 7, 1),
-    valid_to=date(2013, 12, 31),
-    status="nevazeci",
+    valid_to=None,
+    status="vazeci",
     citable=True,
     extra_metadata={"ingestion_source": "manual_pdf", "pdf_filename": PDF_PATH.name},
 )
