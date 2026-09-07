@@ -599,6 +599,10 @@ def aggregate(per_question: list[dict]) -> dict:
         "n_year_like_articles": sum(r["n_year_like_articles"] for r in per_question),
         "retrieval_mode": os.getenv("RETRIEVAL_MODE", "tight"),
         "fts_config": os.getenv("FTS_CONFIG", "simple"),
+        # Recorded, and used to label the summary. A results file that says
+        # "top-5" while the run used ten chunks is worse than one that says
+        # nothing, because someone will quote it.
+        "top_k": int(os.getenv("TOP_K", "5")),
         # Which database produced this. Once a v2 corpus exists alongside v1
         # and the two are compared by swapping DATABASE_URL, a results file
         # with no record of which one it came from is worthless.
@@ -726,8 +730,22 @@ def main():
 
             bits = [f"cat: {result.get('actual_category')}"]
             if result["gradeable_retrieval"]:
+                # `retrieved_articles` drops the rank positions, so a line
+                # reading "want ['35'] got ['35'] ❌ fail" looks like a bug in
+                # the grader when it is the grader working: the pass here is
+                # top-1 OVERALL, and the law chunk was below a magazine chunk.
+                # Say where it landed rather than leaving that to be guessed.
                 bits.append(f"want čl. {result['expected_articles']}")
                 bits.append(f"got {result['retrieved_articles'][:3]}")
+                _hit = next(
+                    (i for i, a in enumerate(
+                        [_extract_article_number(m.get("article_number"))
+                         if m.get("source_type") != "članak" else None
+                         for m in result.get("retrieved_meta", [])], 1)
+                     if a in result["expected_articles"]),
+                    None,
+                )
+                bits.append(f"rang {_hit}" if _hit else "nije dohvaćen")
             elif result["gradeable_source"]:
                 bits.append(f"want {result['expected_sources']}")
                 got = [s for s in result["retrieved_sources"][:3] if s]
@@ -761,26 +779,31 @@ def main():
     nc = metrics["n_gradeable_content"]
     ncl = metrics["n_content_clanci"]
     nzk = metrics["n_content_zakoni"]
-    print(f"  ČLANCI  odgovor u top-1:       {_pct(metrics['content_top_1_clanci'], ncl)}   ← F1")
-    print(f"  ČLANCI  odgovor u top-5:       {_pct(metrics['content_top_k_clanci'], ncl)}   ← F1")
-    print(f"    (bar jedan pojam, top-5):    {_pct(metrics['content_any_top_k_clanci'], ncl)}")
-    print(f"  ČLANCI  odgovor u uniji top-5: {_pct(metrics['content_union_clanci'], ncl)}   ← usporedivo")
+    # The labels used to say "top-5" unconditionally. With TOP_K=10 in .env
+    # that is simply a false statement printed next to a true number, and it
+    # is the kind of thing that gets pasted into a document for the client.
+    k = metrics.get("top_k", 5)
+    print(f"  {f'ČLANCI  odgovor u top-1:':<32}{_pct(metrics['content_top_1_clanci'], ncl)}   ← F1")
+    print(f"  {f'ČLANCI  odgovor u top-{k}:':<32}{_pct(metrics['content_top_k_clanci'], ncl)}   ← F1")
+    print(f"  {f'  (bar jedan pojam, top-{k}):':<32}{_pct(metrics['content_any_top_k_clanci'], ncl)}")
+    print(f"  {f'ČLANCI  odgovor u uniji top-{k}:':<32}{_pct(metrics['content_union_clanci'], ncl)}   ← usporedivo")
     print()
-    print(f"  ZAKONI  odgovor u top-1:       {_pct(metrics['content_top_1_zakoni'], nzk)}   (izvan F1)")
-    print(f"  ZAKONI  odgovor u top-5:       {_pct(metrics['content_top_k_zakoni'], nzk)}   (izvan F1)")
+    print(f"  {f'ZAKONI  odgovor u top-1:':<32}{_pct(metrics['content_top_1_zakoni'], nzk)}   (izvan F1)")
+    print(f"  {f'ZAKONI  odgovor u top-{k}:':<32}{_pct(metrics['content_top_k_zakoni'], nzk)}   (izvan F1)")
     print()
-    print(f"  SVE     odgovor u top-1:       {_pct(metrics['content_top_1'], nc)}")
-    print(f"  SVE     odgovor u top-5:       {_pct(metrics['content_top_k'], nc)}")
-    print(f"    (bar jedan pojam, top-5):    {_pct(metrics['content_any_top_k'], nc)}")
+    print(f"  {f'SVE     odgovor u top-1:':<32}{_pct(metrics['content_top_1'], nc)}")
+    print(f"  {f'SVE     odgovor u top-{k}:':<32}{_pct(metrics['content_top_k'], nc)}")
+    print(f"  {f'  (bar jedan pojam, top-{k}):':<32}{_pct(metrics['content_any_top_k'], nc)}")
     print(f"    [staro, doslovno]:           "
           f"{_pct(metrics['content_top_1_exact'])} / "
           f"{_pct(metrics['content_top_k_exact'])} / "
           f"{_pct(metrics['content_any_top_k_exact'])}")
     print()
-    print(f"  ČLANCI  source top-1:          {_pct(metrics['source_top_1'], ns)}")
-    print(f"  ČLANCI  source top-5:          {_pct(metrics['source_top_k'], ns)}")
-    print(f"  ZAKONI  article top-1:         {_pct(metrics['retrieval_top_1'], ng)}")
-    print(f"  ZAKONI  article top-5:         {_pct(metrics['retrieval_top_k'], ng)}")
+    print(f"  {f'ČLANCI  source top-1:':<32}{_pct(metrics['source_top_1'], ns)}")
+    print(f"  {f'ČLANCI  source top-{k}:':<32}{_pct(metrics['source_top_k'], ns)}")
+    print(f"  {f'ZAKONI  article top-1:':<32}{_pct(metrics['retrieval_top_1'], ng)}"
+          f"   ← rang 1 UKUPNO, ne prvi zakonski chunk")
+    print(f"  {f'ZAKONI  article top-{k}:':<32}{_pct(metrics['retrieval_top_k'], ng)}")
     if metrics["citation_top_1"] is not None:
         print(f"  — via citations (old metric):  {_pct(metrics['citation_top_1'], ng)}")
     if "classifier_accuracy" in metrics:

@@ -25,15 +25,37 @@ from pathlib import Path
 
 # metric key in per_question  →  (label, denominator key, gradeable flag)
 METRICS = [
+    # "top-K", not "top-5": TOP_K is configurable and .env now sets 10. A
+    # label that hardcodes the old value is a false statement printed beside
+    # a true number, and comparisons across runs with different K are exactly
+    # where that misleads. The real K of each run is printed in the header.
     ("content_top_1",     "ODGOVOR top-1",     "gradeable_content"),
-    ("content_top_k",     "ODGOVOR top-5",     "gradeable_content"),
+    ("content_top_k",     "ODGOVOR top-K",     "gradeable_content"),
     ("content_any_top_k", "bar jedan pojam",   "gradeable_content"),
     ("content_union_top_k", "odgovor u uniji", "gradeable_content"),
     ("source_top_1",      "ČLANCI src top-1",  "gradeable_source"),
-    ("source_top_k",      "ČLANCI src top-5",  "gradeable_source"),
+    ("source_top_k",      "ČLANCI src top-K",  "gradeable_source"),
     ("retrieval_top_1",   "ZAKONI čl. top-1",  "gradeable_retrieval"),
-    ("retrieval_top_k",   "ZAKONI čl. top-5",  "gradeable_retrieval"),
+    ("retrieval_top_k",   "ZAKONI čl. top-K",  "gradeable_retrieval"),
+    # End-to-end. Only present in runs that generated; absent metrics simply
+    # score 0 on both sides, which is visible as a row of zeros rather than a
+    # silent omission.
+    ("answer_kw_all",     "ODGOVOR svi pojmovi", "gradeable_content"),
+    ("answer_kw_any",     "ODGOVOR bar jedan",   "gradeable_content"),
 ]
+
+
+def _config(run: dict) -> str:
+    """One line describing what produced this run — corpus, K, mode."""
+    m = run.get("metrics", {}) or {}
+    parts = [
+        m.get("database", "?"),
+        f"K={m.get('top_k', '?')}",
+        f"mode={m.get('retrieval_mode', run.get('retrieval_mode', '?'))}",
+        f"fts={m.get('fts_config', '?')}",
+        "gen" if not run.get("skip_generation") else "retrieval-only",
+    ]
+    return "  ".join(str(p) for p in parts)
 
 
 def load(path: str) -> dict:
@@ -57,8 +79,9 @@ def spread(paths: list[str]) -> None:
     runs = [load(p) for p in paths]
     print(f"\nSpread across {len(runs)} runs of (nominally) the same config")
     print("=" * 72)
-    for name in (r["_name"] for r in runs):
-        print(f"  {name}")
+    for r in runs:
+        print(f"  {r['_name']}")
+        print(f"    {_config(r)}")
     print()
     print(f"  {'metric':<20} {'min':>7} {'max':>7} {'range':>8}   n")
     print("  " + "-" * 52)
@@ -93,8 +116,13 @@ def spread(paths: list[str]) -> None:
 def compare(base_path: str, new_path: str) -> None:
     base, new = load(base_path), load(new_path)
     print(f"\nbase: {base['_name']}")
+    print(f"      {_config(base)}")
     print(f"new : {new['_name']}")
+    print(f"      {_config(new)}")
     print("=" * 72)
+    if _config(base) != _config(new):
+        print("  ! The two runs differ in more than one setting. Whatever moved,\n"
+              "    you cannot attribute it to any single one of them.\n")
     print(f"  {'metric':<20} {'base':>7} {'new':>7} {'delta':>8}   moved   n")
     print("  " + "-" * 60)
 
