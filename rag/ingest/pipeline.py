@@ -75,11 +75,20 @@ Vrati ISKLJUČIVO JSON array bez ikakvog teksta prije ili nakon:
 
 def _classify_batch(client: anthropic.Anthropic, batch: list[tuple[int, str]]) -> list[dict]:
     """Classify a batch of (idx, text) pairs. Returns list of {id, domain, subdomain}."""
-    payload = [{"id": str(idx), "text": text[:600]} for idx, text in batch]
+    # v2 sent text[:600] — a quarter of a median chunk and 6% of the longest.
+    # Subdomain labels derived from that were noisy enough that filtering on
+    # them lost to filtering on domain alone in the 6 Sep ablation. Chunks are
+    # now capped at ~400 tokens by the loader, so the whole chunk fits
+    # comfortably in a classification batch.
+    payload = [{"id": str(idx), "text": text} for idx, text in batch]
     try:
         r = client.messages.create(
             model=CLASSIFIER_MODEL,
             max_tokens=1024,
+            # Same reasoning as the query classifier: labelling has one right
+            # answer, and 30,000 labels is a lot of places for sampling noise
+            # to land.
+            temperature=0,
             system=_CLF_SYSTEM,
             messages=[{"role": "user", "content": json.dumps(payload, ensure_ascii=False)}],
         )

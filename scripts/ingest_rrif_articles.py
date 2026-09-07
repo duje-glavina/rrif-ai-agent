@@ -1,4 +1,4 @@
-"""Ingest RRiF magazine articles from the archive into the chunks table.
+r"""Ingest RRiF magazine articles from the archive into the chunks table.
 
 Walks one or more archive folders (e.g. RRIF2404, PIP2401, RRIF2401...),
 loads each article with article_loader.py, and ingests into the RAG pipeline.
@@ -22,7 +22,6 @@ Options:
 """
 import argparse
 import sys
-from calendar import monthrange
 from datetime import date
 from pathlib import Path
 
@@ -31,16 +30,30 @@ sys.path.insert(0, str(Path(__file__).parent.parent))
 
 from rag.ingest.article_loader import load_article, PUB_TYPE
 from rag.ingest.pipeline import SourceMetadata, ingest
-from rag.classifier import STATUS_VALID, STATUS_INVALID
+from rag.classifier import STATUS_VALID
 
 
 # ── VALIDITY RULES ────────────────────────────────────────────────────────────
-# Articles are considered valid for the year they were published.
-# valid_to = last day of the publication year.
-# For 2014 issues (very old), we mark nevažeći immediately — still in corpus
-# for temporal queries but won't surface for current-law questions.
-CURRENT_YEAR = 2025  # articles from this year onward get valid_to=NULL (currently valid)
-HISTORICAL_CUTOFF = 2019  # articles before this year are nevažeći on ingest
+#
+# Revised 7 Sep 2026. Previously: valid_to = 31 December of the publication
+# year, and anything published before HISTORICAL_CUTOFF = 2019 was stamped
+# `nevazeci` on ingest. Both were wrong, and both were measured to be wrong.
+#
+# `status` is a legal property. A statute article is in force or superseded; a
+# magazine article is neither. A 2014 piece on how to book depreciation was
+# correct then and is correct now. Using publication year as a proxy for legal
+# currency hid 5,174 chunks of still-correct method from every current-state
+# question.
+#
+# `valid_to` was worse. On "Koji je novi prag za ulazak u sustav PDV-a od
+# 2025.?" the classifier asks for 2025-01-01, and the December 2024 issue —
+# the issue where RRiF publishes next year's changes — failed
+# `valid_to >= 2025-01-01`. That question returned nothing at all; without the
+# constraint it returns five correct chunks at 0.999.
+#
+# So an article now never expires: valid_to = NULL, status = vazeci. Age is a
+# ranking concern, not an eligibility test, and belongs in retrieval rather
+# than in the row. See rag/query.py, TEMPORAL_MODE.
 
 
 def _source_metadata(chunk) -> SourceMetadata:
@@ -48,17 +61,13 @@ def _source_metadata(chunk) -> SourceMetadata:
     year = chunk.year
     month = chunk.month
 
-    # valid_from = first day of publication month
+    # valid_from = first day of publication month. This one is meaningful: it
+    # is when the article appeared, and it is what a recency ranking will read.
     valid_from = date(year, month, 1)
 
-    # valid_to = last day of publication year (or NULL if current)
-    if year >= CURRENT_YEAR:
-        valid_to = None
-        status = STATUS_VALID
-    else:
-        last_day = monthrange(year, 12)[1]
-        valid_to = date(year, 12, last_day)
-        status = STATUS_INVALID if year < HISTORICAL_CUTOFF else STATUS_VALID
+    # An article does not expire. See the note above.
+    valid_to = None
+    status = STATUS_VALID
 
     return SourceMetadata(
         category=chunk.default_category,
@@ -137,7 +146,12 @@ def run(roots: list[Path], dry_run: bool = False):
 
         first = result[0]
         label = f"{folder_name}/{pdf.name}"
-        print(f"  {label:35s}  {len(result):3d} chunks  {first.title[:50]}")
+        toks = sorted(c.token_count for c in result)
+        over = sum(1 for x in toks if x > 508)
+        print(f"  {label:35s}  {len(result):3d} chunks  "
+              f"tok {toks[0]}/{toks[len(toks)//2]}/{toks[-1]}"
+              f"{'  ⚠ ' + str(over) + ' over 508' if over else ''}  "
+              f"{first.title[:60]}")
 
         if dry_run:
             continue
