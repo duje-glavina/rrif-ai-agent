@@ -559,6 +559,82 @@ def _title_key(line: str) -> str:
     return re.sub(r"\s+", " ", _LEADING_DASH.sub("", line)).strip().lower()
 
 
+_ADS_LINE = re.compile(
+    r'@|\bwww\.|\+\d{3}\s*\d|\btel\.|\bmob\.|\bfax\.', re.I)
+
+
+def _title_from_layout(pdf_path: Path) -> str | None:
+    """The title is the largest type on the first page.
+
+    Position-based rules kept breaking because the templates disagree. In the
+    2024 issues the title follows the byline and each line is drawn twice; in
+    2014 it precedes the byline, is not duplicated, and may sit under a
+    full-page advert whose lines look exactly like title fragments. Trying to
+    encode both — and then whatever PiP and Proračun do — is a losing game.
+
+    Type size is the one thing every magazine layout agrees on. pymupdf exposes
+    it per span, so we take the largest size on page one, collect every span at
+    that size in reading order, and join them. Duplicate spans collapse (the
+    2024 outline-plus-fill artefact), and a run carrying advert markers is
+    rejected in favour of the next size down.
+
+    Returns None when nothing plausible is found, so the caller can fall back
+    to the text heuristics.
+    """
+    try:
+        doc = fitz.open(pdf_path)
+        page = doc[0]
+        data = page.get_text("dict")
+        doc.close()
+    except Exception:
+        return None
+
+    spans: list[tuple[float, float, float, str]] = []
+    for block in data.get("blocks", []):
+        if block.get("type") != 0:          # 0 = text
+            continue
+        for line in block.get("lines", []):
+            for s in line.get("spans", []):
+                txt = re.sub(r"\s+", " ", s.get("text", "")).strip()
+                if len(txt) < 2:
+                    continue
+                spans.append((round(float(s.get("size", 0)), 1),
+                              float(s["bbox"][1]), float(s["bbox"][0]), txt))
+    if not spans:
+        return None
+
+    # Descending distinct sizes, ignoring sizes that only ever carry fragments.
+    sizes = sorted({sz for sz, _, _, tx in spans if len(tx) >= 4}, reverse=True)
+
+    for size in sizes[:4]:
+        run = [s for s in spans if abs(s[0] - size) < 0.6]
+        run.sort(key=lambda s: (s[1], s[2]))     # reading order: top, then left
+
+        parts: list[str] = []
+        prev = None
+        for _, _, _, txt in run:
+            key = _title_key(txt)
+            if key and key == prev:              # outline + fill pass
+                continue
+            parts.append(txt)
+            prev = key
+
+        title = _DASH_RUN.sub("–", " ".join(parts))
+        title = re.sub(r"\s+", " ", title).strip()
+
+        if len(title) < 8:
+            continue
+        if _ADS_LINE.search(title):              # advert block set in big type
+            continue
+        if _AUTHOR.search(title):                # byline set at title size
+            continue
+        if len(title) > MAX_TITLE_CHARS:
+            title = title[:MAX_TITLE_CHARS].rsplit(" ", 1)[0]
+        return title
+
+    return None
+
+
 def _extract_title_and_author(text: str) -> tuple[str, str | None]:
     """Find the article title and byline.
 
@@ -757,6 +833,9 @@ def load_article(pdf_path: Path | str, verbose: bool = True) -> list[ArticleChun
 
     category      = _detect_category(text, pub_type)
     title, author = _extract_title_and_author(text)
+    layout_title  = _title_from_layout(pdf_path)
+    if layout_title:
+        title = layout_title
     # Only now — the title detector reads the duplication this removes.
     sections      = _split_into_sections(collapse_repeated_lines(text))
     base_citation = f"{pub_label} br. {month}/{year} — {title}"
