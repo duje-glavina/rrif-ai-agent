@@ -166,7 +166,44 @@ def load_golden_set() -> list[dict]:
         return yaml.safe_load(f)
 
 
+def _norm_text(s: str) -> str:
+    """Collapse whitespace and close up '20 %' → '20%'.
+
+    Croatian typography puts a space before the percent sign, and the golden
+    set writes '20%', so an exact substring test misses text that plainly
+    contains the answer. Same for the non-breaking spaces and soft hyphens
+    the PDF extraction leaves behind.
+    """
+    s = s.lower().replace(" ", " ").replace("­", "")
+    s = re.sub(r"\s+", " ", s)
+    return re.sub(r"\s+%", "%", s)
+
+
+def _fold_text(s: str) -> str:
+    """_norm_text, then strip Croatian inflection. Both sides, equally."""
+    return stem_text_crude(_norm_text(s))
+
+
 def _keyword_hits(answer_text: str, keywords: list[str]) -> tuple[int, int]:
+    """How many expected key terms the GENERATED ANSWER mentions.
+
+    Morphology-aware, for the same reason retrieval grading is: the golden
+    set says "reprezentacija" and a Croatian sentence says "reprezentacije".
+    Exact substring matching scored those as misses on the retrieval side and
+    cost ~11 points there; the answer side had the identical bug and nobody
+    had looked, because generation was rarely run. Both sides are folded with
+    the crude stemmer, pinned, so the metric cannot drift with whatever
+    stemmer happens to be installed.
+    """
+    if not keywords:
+        return 0, 0
+    text = _fold_text(answer_text)
+    hits = sum(1 for kw in keywords if _fold_text(kw) in text)
+    return hits, len(keywords)
+
+
+def _keyword_hits_exact(answer_text: str, keywords: list[str]) -> tuple[int, int]:
+    """The old literal-substring definition, kept so older runs stay readable."""
     if not keywords:
         return 0, 0
     text = answer_text.lower()
@@ -266,21 +303,11 @@ def evaluate_one(item: dict, *, skip_generation: bool, enable_rewrite: bool) -> 
     keywords = [k for k in (item.get("expected_keywords") or []) if k]
     gradeable_content = bool(in_corpus and keywords)
 
-    def _norm(s: str) -> str:
-        """Collapse whitespace and close up '20 %' → '20%'.
-
-        Croatian typography puts a space before the percent sign, and the
-        golden set writes '20%', so an exact substring test misses a chunk
-        that plainly contains the answer. Same for the non-breaking spaces
-        and soft hyphens the PDF extraction leaves behind.
-        """
-        s = s.lower().replace(" ", " ").replace("­", "")
-        s = re.sub(r"\s+", " ", s)
-        return re.sub(r"\s+%", "%", s)
-
-    def _fold(s: str) -> str:
-        """_norm, then strip Croatian inflection from both sides equally."""
-        return stem_text_crude(_norm(s))
+    # Module-level so the answer-side grader (`_keyword_hits`) folds text
+    # exactly the way the chunk-side grader does. When these two definitions
+    # lived apart, retrieval was morphology-aware and the answer was not.
+    _norm = _norm_text
+    _fold = _fold_text
 
     _kw_exact = [_norm(k) for k in keywords]
     _kw_fold = [_fold(k) for k in keywords]
@@ -371,6 +398,7 @@ def evaluate_one(item: dict, *, skip_generation: bool, enable_rewrite: bool) -> 
     # ── Generation grading ──────────────────────────────────────────────────
     refusal_correct = None
     keyword_hits = keyword_total = None
+    keyword_hits_exact = None
     answer_text = ""
     citations_raw: list[dict] = []
     cost = None
@@ -390,6 +418,9 @@ def evaluate_one(item: dict, *, skip_generation: bool, enable_rewrite: bool) -> 
         if in_corpus:
             refusal_correct = not result.referred_to_advisor
             keyword_hits, keyword_total = _keyword_hits(
+                answer_text, item.get("expected_keywords", [])
+            )
+            keyword_hits_exact, _ = _keyword_hits_exact(
                 answer_text, item.get("expected_keywords", [])
             )
         else:
@@ -463,9 +494,28 @@ def evaluate_one(item: dict, *, skip_generation: bool, enable_rewrite: bool) -> 
         "actual_category": actual_cat,
         "category_correct": category_correct,
         "refusal_correct": refusal_correct,
+        # The FULL answer, not a preview. `eval/grade_answers.py` and
+        # `eval/make_review_sheet.py` both read the results file rather than
+        # re-running the pipeline, and a 300-character truncation makes an
+        # answer ungradeable — the caveats and the citation line live at the
+        # end. The preview is kept because older tooling reads it.
+        "answer": answer_text,
         "answer_preview": answer_text[:300] if answer_text else "",
+        "citations_raw": citations_raw,
         "n_citations": len(citations_raw),
+        # Did the ANSWER (not just the retrieved chunk) state the expected
+        # terms. This is the end-to-end version of content_top_k: retrieval
+        # can put the fact in front of the generator and the generator can
+        # still fail to say it.
+        "answer_kw_all": (
+            None if keyword_total in (None, 0)
+            else keyword_hits == keyword_total
+        ),
+        "answer_kw_any": (
+            None if keyword_total in (None, 0) else keyword_hits > 0
+        ),
         "keyword_hits": keyword_hits,
+        "keyword_hits_exact": keyword_hits_exact,
         "keyword_total": keyword_total,
         "passed": passed,
         "original_query": result.original_query,
@@ -565,6 +615,42 @@ def aggregate(per_question: list[dict]) -> dict:
         )
 
     if has_generation:
+        # ── End-to-end: did the ANSWER say it ───────────────────────────────
+        # Everything above this line grades retrieval. The acceptance
+        # criterion is about answers, and retrieval putting the fact in the
+        # context window is necessary, not sufficient. The gap between
+        # content_top_k_clanci and answer_kw_all_clanci is the generator's
+        # contribution — a large gap means the prompt, not the retriever, is
+        # what to work on next.
+        ans_clanci = [r for r in con_clanci if r.get("answer_kw_all") is not None]
+        ans_all = [r for r in con_gradeable if r.get("answer_kw_all") is not None]
+        metrics["n_answer_graded_clanci"] = len(ans_clanci)
+        metrics["answer_kw_all_clanci"] = _mean([r["answer_kw_all"] for r in ans_clanci])
+        metrics["answer_kw_any_clanci"] = _mean([r["answer_kw_any"] for r in ans_clanci])
+        metrics["n_answer_graded"] = len(ans_all)
+        metrics["answer_kw_all"] = _mean([r["answer_kw_all"] for r in ans_all])
+        metrics["answer_kw_any"] = _mean([r["answer_kw_any"] for r in ans_all])
+        # Per-term recall, which moves more smoothly than the all-or-nothing
+        # rate on a 31-question set.
+        metrics["answer_kw_recall"] = _mean(
+            [r["keyword_hits"] / r["keyword_total"] for r in ans_all
+             if r.get("keyword_total")]
+        )
+        # Same number under the old literal-substring rule. If this is far
+        # below the folded one, the difference is Croatian declension, not
+        # the model.
+        metrics["answer_kw_recall_exact"] = _mean(
+            [r["keyword_hits_exact"] / r["keyword_total"] for r in ans_all
+             if r.get("keyword_total") and r.get("keyword_hits_exact") is not None]
+        )
+        metrics["avg_citations_per_answer"] = _mean(
+            [r["n_citations"] for r in in_corpus]
+        )
+        metrics["answers_with_no_citation"] = sum(
+            1 for r in in_corpus
+            if r.get("refusal_correct") and not r.get("n_citations")
+        )
+
         metrics["in_corpus_no_false_refusal_rate"] = _mean(
             [r["refusal_correct"] for r in in_corpus]
         )
@@ -699,6 +785,23 @@ def main():
         print(f"  — via citations (old metric):  {_pct(metrics['citation_top_1'], ng)}")
     if "classifier_accuracy" in metrics:
         print(f"  Classifier accuracy:           {_pct(metrics['classifier_accuracy'])}")
+    if metrics.get("n_answer_graded_clanci"):
+        nac = metrics["n_answer_graded_clanci"]
+        print()
+        print("  ── generacija (end-to-end) ──")
+        print(f"  ČLANCI  odgovor sadrži SVE pojmove: {_pct(metrics['answer_kw_all_clanci'], nac)}   ← F1 kriterij")
+        print(f"  ČLANCI  odgovor sadrži bar jedan:   {_pct(metrics['answer_kw_any_clanci'], nac)}")
+        print(f"  Prosječan udio pojmova u odgovoru:  {_pct(metrics['answer_kw_recall'])}"
+              f"   [doslovno: {_pct(metrics['answer_kw_recall_exact'])}]")
+        if metrics.get("avg_citations_per_answer") is not None:
+            print(f"  Prosječno izvora po odgovoru:       {metrics['avg_citations_per_answer']:.1f}"
+                  f"   (bez ijednog izvora: {metrics['answers_with_no_citation']})")
+        gap = None
+        if metrics.get("content_top_k_clanci") is not None and metrics.get("answer_kw_all_clanci") is not None:
+            gap = metrics["content_top_k_clanci"] - metrics["answer_kw_all_clanci"]
+            print(f"  Razlika dohvat → odgovor:           {gap:+.1%}"
+                  f"   (koliko generator izgubi od onoga što mu je dohvat dao)")
+        print()
     if metrics.get("trap_refusal_rate") is not None:
         print(f"  Trap refusal rate:             {_pct(metrics['trap_refusal_rate'], metrics['n_traps'])}")
         print(f"  No-false-refusal (in corpus):  {_pct(metrics['in_corpus_no_false_refusal_rate'], metrics['n_in_corpus'])}")
