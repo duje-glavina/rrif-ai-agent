@@ -30,7 +30,14 @@ load_dotenv()
 log = logging.getLogger(__name__)
 
 CLASSIFIER_MODEL = "claude-haiku-4-5"
+
+# The two values the status column actually holds — verified against
+# SELECT DISTINCT status FROM chunks. No diacritics: the column stores
+# 'vazeci'/'nevazeci', not 'važeći'/'nevažeći'. _build_where in rag/query.py
+# compares against these literally, so a mismatch here silently removes rows
+# from every current-state query rather than raising.
 STATUS_VALID = "vazeci"
+STATUS_INVALID = "nevazeci"
 
 SYSTEM_PROMPT = f"""Ti si klasifikator upita za sustav pretraživanja hrvatskog računovodstvenog i poreznog znanja.
 
