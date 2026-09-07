@@ -28,6 +28,7 @@ METRICS = [
     ("content_top_1",     "ODGOVOR top-1",     "gradeable_content"),
     ("content_top_k",     "ODGOVOR top-5",     "gradeable_content"),
     ("content_any_top_k", "bar jedan pojam",   "gradeable_content"),
+    ("content_union_top_k", "odgovor u uniji", "gradeable_content"),
     ("source_top_1",      "ČLANCI src top-1",  "gradeable_source"),
     ("source_top_k",      "ČLANCI src top-5",  "gradeable_source"),
     ("retrieval_top_1",   "ZAKONI čl. top-1",  "gradeable_retrieval"),

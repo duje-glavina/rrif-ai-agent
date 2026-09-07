@@ -305,12 +305,38 @@ def evaluate_one(item: dict, *, skip_generation: bool, enable_rewrite: bool) -> 
         content_top_1_exact = _ex_all[0]
         content_top_k_exact = any(_ex_all)
         content_any_top_k_exact = any(_any_hits(_exact_texts, _kw_exact))
+
+        # UNION METRICS — the only ones comparable across chunk sizes.
+        #
+        # content_top_1/top_k ask whether ONE chunk holds every keyword. Halve
+        # the chunk size and that gets mechanically harder whether or not
+        # retrieval improved, which makes them useless for comparing two
+        # corpora chunked differently — exactly what the v1/v2 A/B does.
+        #
+        # They are also wrong about the system: the generator is handed all
+        # five chunks at once, so an answer spread over chunks 1 and 2 reaches
+        # it just as completely as one sitting whole in chunk 1.
+        #
+        # union_top_k: did the top-5 collectively contain the answer.
+        # n_chunks_to_answer: how many chunks, read in rank order, before they
+        # do. 1 is ideal, and it degrades gracefully rather than falling off a
+        # cliff when a chunk boundary lands mid-answer.
+        _union = ""
+        n_chunks_to_answer = None
+        for _i, _txt in enumerate(_fold_texts):
+            _union += " " + _txt
+            if all(k in _union for k in _kw_fold):
+                n_chunks_to_answer = _i + 1
+                break
+        content_union_top_k = n_chunks_to_answer is not None
     elif gradeable_content:
         content_top_1 = content_top_k = content_any_top_k = False
         content_top_1_exact = content_top_k_exact = content_any_top_k_exact = False
+        content_union_top_k, n_chunks_to_answer = False, None
     else:
         content_top_1 = content_top_k = content_any_top_k = None
         content_top_1_exact = content_top_k_exact = content_any_top_k_exact = None
+        content_union_top_k, n_chunks_to_answer = None, None
 
     # ── Source grading — magazine content, secondary ────────────────────────
     expected_keys = {k for k in (_parse_source_key(s) for s in expected_sources) if k}
@@ -405,6 +431,8 @@ def evaluate_one(item: dict, *, skip_generation: bool, enable_rewrite: bool) -> 
         "content_top_1": content_top_1,
         "content_top_k": content_top_k,
         "content_any_top_k": content_any_top_k,
+        "content_union_top_k": content_union_top_k,
+        "n_chunks_to_answer": n_chunks_to_answer,
         "content_top_1_exact": content_top_1_exact,
         "content_top_k_exact": content_top_k_exact,
         "content_any_top_k_exact": content_any_top_k_exact,
@@ -452,6 +480,15 @@ def evaluate_one(item: dict, *, skip_generation: bool, enable_rewrite: bool) -> 
 # Aggregation
 # ---------------------------------------------------------------------------
 
+def _db_name() -> str:
+    """Database name from DATABASE_URL, without the credentials."""
+    from urllib.parse import urlparse
+    try:
+        return urlparse(os.environ["DATABASE_URL"]).path.lstrip("/") or "?"
+    except Exception:
+        return "?"
+
+
 def aggregate(per_question: list[dict]) -> dict:
     n = len(per_question)
     in_corpus = [r for r in per_question if r["in_corpus"]]
@@ -478,6 +515,13 @@ def aggregate(per_question: list[dict]) -> dict:
         "content_top_1": _mean([r["content_top_1"] for r in con_gradeable]),
         "content_top_k": _mean([r["content_top_k"] for r in con_gradeable]),
         "content_any_top_k": _mean([r["content_any_top_k"] for r in con_gradeable]),
+        # Chunk-size neutral; see the note in evaluate_one.
+        "content_union_top_k": _mean([r.get("content_union_top_k") for r in con_gradeable]),
+        "content_union_clanci": _mean([r.get("content_union_top_k") for r in con_clanci]),
+        "avg_chunks_to_answer": _mean(
+            [r["n_chunks_to_answer"] for r in con_gradeable
+             if r.get("n_chunks_to_answer") is not None]
+        ),
         # Split by scope. ČLANCI is the F1 number; ZAKONI is tracked but out
         # of F1 scope until the law question in the TehSpec is settled.
         "n_content_clanci": len(con_clanci),
@@ -504,6 +548,11 @@ def aggregate(per_question: list[dict]) -> dict:
         "avg_top_rerank_score": _mean([r["top_rerank_score"] for r in per_question]),
         "n_year_like_articles": sum(r["n_year_like_articles"] for r in per_question),
         "retrieval_mode": os.getenv("RETRIEVAL_MODE", "tight"),
+        "fts_config": os.getenv("FTS_CONFIG", "simple"),
+        # Which database produced this. Once a v2 corpus exists alongside v1
+        # and the two are compared by swapping DATABASE_URL, a results file
+        # with no record of which one it came from is worthless.
+        "database": _db_name(),
     }
 
     in_corpus_with_cat = [
@@ -629,6 +678,7 @@ def main():
     print(f"  ČLANCI  odgovor u top-1:       {_pct(metrics['content_top_1_clanci'], ncl)}   ← F1")
     print(f"  ČLANCI  odgovor u top-5:       {_pct(metrics['content_top_k_clanci'], ncl)}   ← F1")
     print(f"    (bar jedan pojam, top-5):    {_pct(metrics['content_any_top_k_clanci'], ncl)}")
+    print(f"  ČLANCI  odgovor u uniji top-5: {_pct(metrics['content_union_clanci'], ncl)}   ← usporedivo")
     print()
     print(f"  ZAKONI  odgovor u top-1:       {_pct(metrics['content_top_1_zakoni'], nzk)}   (izvan F1)")
     print(f"  ZAKONI  odgovor u top-5:       {_pct(metrics['content_top_k_zakoni'], nzk)}   (izvan F1)")
@@ -653,6 +703,11 @@ def main():
         print(f"  Trap refusal rate:             {_pct(metrics['trap_refusal_rate'], metrics['n_traps'])}")
         print(f"  No-false-refusal (in corpus):  {_pct(metrics['in_corpus_no_false_refusal_rate'], metrics['n_in_corpus'])}")
     print(f"  Overall pass rate:             {_pct(metrics['overall_pass_rate'], metrics['n_judged'])}")
+    if metrics.get("avg_chunks_to_answer") is not None:
+        print(f"  Chunks needed for answer:      "
+              f"{metrics['avg_chunks_to_answer']:.2f}  (1.00 = whole answer at rank 1)")
+    print(f"  Corpus:                        {metrics['database']}  "
+          f"(mode={metrics['retrieval_mode']}, fts={metrics['fts_config']})")
     print(f"  Avg latency:                   {metrics['avg_latency_ms']:.0f} ms")
     if metrics["avg_top_rerank_score"] is not None:
         print(f"  Avg top rerank score:          {metrics['avg_top_rerank_score']:.4f}")
