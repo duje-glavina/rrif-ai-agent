@@ -173,6 +173,12 @@ def classify(question: str) -> ClassifierResult:
         response = client.messages.create(
             model=CLASSIFIER_MODEL,
             max_tokens=256,
+            # Classification is a labelling task with one right answer, so
+            # sampling buys nothing and costs reproducibility: at the default
+            # temperature two eval runs of identical code classified the same
+            # question differently, changed the subdomain filter, and moved
+            # ČLANCI source top-1 by 7.7 points with nothing else altered.
+            temperature=0,
             system=SYSTEM_PROMPT,
             messages=[{"role": "user", "content": question}],
         )
