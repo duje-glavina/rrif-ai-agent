@@ -99,6 +99,13 @@ def _tokenizer():
     of weights the loader never uses.
     """
     from transformers import AutoTokenizer
+    from transformers.utils import logging as hf_logging
+
+    # "Token indices sequence length is longer than the specified maximum" is
+    # emitted for every over-length string we *count*. We never run the model
+    # here, so it is noise — and across a full ingest it prints thousands of
+    # times and buries anything worth reading.
+    hf_logging.set_verbosity_error()
     return AutoTokenizer.from_pretrained(EMBED_MODEL)
 
 
@@ -523,79 +530,143 @@ def _detect_category(text: str, pub_type: str) -> str:
 
 # ── Title and author ──────────────────────────────────────────────────────────
 
-MAX_TITLE_CHARS = 120
+MAX_TITLE_CHARS = 140
 
 _SKIP_LINE = re.compile(
-    r'^(\d+|UDK\s|RRIF|RRiF|veljača|siječanj|ožujak|travanj|svibanj|'
+    r'^(\d+|UDK\b|RRIF|RRiF|veljača|siječanj|ožujak|travanj|svibanj|'
     r'lipanj|srpanj|kolovoz|rujan|listopad|studeni|prosinac|Priredila|'
-    r'Računovodstvo, revizija i financije)\b',
+    r'Računovodstvo, revizija i financije)',
     re.IGNORECASE,
 )
 _AUTHOR = re.compile(
     r'(Dr\.\s*sc\.|dipl\.|prof\.|ovl\.|mr\.\s*sc\.|mag\.|izv\.|univ\.\s*spec\.)',
     re.I,
 )
-# An all-caps run with no lowercase is the section banner, not a title.
-_BANNER = re.compile(r'^[A-ZČĆŠŽĐ\s\-/\.,0-9]{3,}$')
-# A title is a phrase, not a sentence: it does not end in a full stop and does
-# not contain sentence-internal punctuation runs.
-_LOOKS_LIKE_PROSE = re.compile(r'[.;:]\s+\S')
+_SECTION_START = re.compile(r'^\d{1,2}\.\s')
+_LEADING_DASH = re.compile(r'^(?:[–—-]\s*)+')
+_DASH_RUN = re.compile(r'[–—-]\s*[–—-]')
+
+TITLE_SEARCH_LINES = 60
+MIN_DUP_TITLE_CHARS = 4
+
+
+def _title_key(line: str) -> str:
+    """Comparison form for spotting a duplicated headline line.
+
+    Leading dashes are stripped because the two copies do not always agree on
+    them — the outline pass can carry "– –" where the fill pass has nothing.
+    """
+    return re.sub(r"\s+", " ", _LEADING_DASH.sub("", line)).strip().lower()
 
 
 def _extract_title_and_author(text: str) -> tuple[str, str | None]:
-    """Find the article title and byline in the first page's lines.
+    """Find the article title and byline.
 
-    RRiF's layout runs: section banner (all caps) → title → byline with a
-    qualification abbreviation → body. So the title is the last plausible line
-    before the byline, and where there is no byline it is the first line that
-    is neither banner nor obviously prose.
+    RRiF's layout, confirmed against the December 2024 issue:
 
-    v2 joined the first four surviving lines and produced a paragraph in 96.6%
-    of cases. Whatever this gets wrong, it is bounded: never more than one line
-    and never more than MAX_TITLE_CHARS.
+        masthead / page number
+        SECTION BANNER (all caps)
+        byline, with a qualification abbreviation
+        [optional abstract, optional UDK line]
+        title line          ← each line appears TWICE
+        title line
+        1.  SECTION HEADING
+        body...
+
+    The duplication is a rendering artefact — the headline is drawn as outline
+    plus fill and the text layer captures both passes — and it is the most
+    reliable marker on the page, because nothing else repeats itself
+    line-for-line. Taking the run of duplicated lines also recovers multi-line
+    titles intact, which a single-line heuristic cannot.
+
+    v2 instead joined the first four lines that survived a skip filter, and on
+    a two-column page those are body text. That is why 96.6% of `source` values
+    in the v2 corpus were paragraphs rather than citations.
     """
-    lines = [l.strip() for l in text.split("\n") if l.strip()][:40]
+    lines = [l.strip() for l in text.split("\n") if l.strip()][:TITLE_SEARCH_LINES]
 
     author: str | None = None
     author_idx: int | None = None
     for i, line in enumerate(lines):
-        if _AUTHOR.search(line) and len(line) < 90:
+        if _AUTHOR.search(line) and len(line) < 100:
             author, author_idx = line, i
             break
 
-    def _plausible(line: str) -> bool:
-        if len(line) < 8 or len(line) > MAX_TITLE_CHARS:
-            return False
-        if _SKIP_LINE.match(line):
-            return False
-        if _BANNER.match(line):          # section banner
-            return False
-        if _LOOKS_LIKE_PROSE.search(line):
-            return False
-        if line.endswith(('.', ',')):    # sentence fragment, not a heading
-            return False
-        return True
+    # The title follows the byline. Where there is no byline, scan the lot.
+    start = author_idx + 1 if author_idx is not None else 0
 
-    # Prefer the run of lines immediately before the byline — that is where the
-    # title sits in this layout.
-    search_space = lines[:author_idx] if author_idx else lines
-    candidates = [l for l in search_space if _plausible(l)]
+    parts: list[str] = []
+    i = start
+    while i < len(lines) - 1:
+        key = _title_key(lines[i])
+        if (key and len(key) >= MIN_DUP_TITLE_CHARS
+                and key == _title_key(lines[i + 1])
+                and not _SECTION_START.match(lines[i])):
+            j = i
+            while (j < len(lines) - 1
+                   and _title_key(lines[j])
+                   and _title_key(lines[j]) == _title_key(lines[j + 1])
+                   and not _SECTION_START.match(lines[j])):
+                parts.append(lines[j])
+                j += 2
+            break
+        i += 1
 
-    if candidates:
-        title = candidates[-1] if author_idx else candidates[0]
+    if parts:
+        title = _DASH_RUN.sub("–", " ".join(parts))
+        title = re.sub(r"\s+", " ", title).strip()
     else:
-        # Nothing passed. Take the first line with any lowercase in it and cut
-        # it hard, so the citation is short and wrong rather than long and
-        # wrong — a bad label the eye can spot beats a paragraph.
-        loose = [l for l in lines if any(c.islower() for c in l) and len(l) > 8]
-        title = (loose[0][:MAX_TITLE_CHARS].rsplit(" ", 1)[0] if loose
-                 else "Nepoznat naslov")
+        # No duplicated run — an older issue or a different template. Fall back
+        # to the first line after the byline that is not furniture, capped
+        # hard: a short wrong label is visibly wrong, a paragraph is not.
+        tail = lines[start:] if author_idx is not None else lines
+        cand = [
+            l for l in tail
+            if 8 < len(l) <= MAX_TITLE_CHARS
+            and not _SKIP_LINE.match(l)
+            and not _SECTION_START.match(l)
+            and any(c.islower() for c in l)
+            and not l.endswith(('.', ','))
+        ]
+        title = cand[0] if cand else "Nepoznat naslov"
 
-    # A drop cap can leave the first letter on its own line: "P" + "orezni..."
-    if len(title) == 1:
+    if len(title) > MAX_TITLE_CHARS:
+        title = title[:MAX_TITLE_CHARS].rsplit(" ", 1)[0]
+    if len(title) < 4:
         title = "Nepoznat naslov"
 
-    return re.sub(r"\s+", " ", title).strip(), author
+    return title, author
+
+
+# ── Repeated headline lines in the body ───────────────────────────────────────
+
+MIN_DEDUP_CHARS = 8
+# A line must contain a real word before it can be dropped as a duplicate.
+# Numeric table rows repeat legitimately — two "0,00" cells under each other
+# are data, not a rendering artefact.
+_HAS_WORD = re.compile(r'[A-Za-zČĆŠŽĐČĆŠŽĐčćšžđ]{3,}')
+
+
+def collapse_repeated_lines(text: str) -> str:
+    """Drop a line that merely repeats the one before it.
+
+    Same rendering artefact as above: without this the headline appears twice
+    inside the first chunk of every article, and section headings do too. Only
+    applied to lines over MIN_DEDUP_CHARS, so a table with two identical short
+    rows — "0,00" under "0,00" — keeps both.
+
+    Must run AFTER title extraction, which depends on the duplication.
+    """
+    out: list[str] = []
+    prev_key = None
+    for line in text.split("\n"):
+        key = _title_key(line)
+        if (key and len(key) >= MIN_DEDUP_CHARS and key == prev_key
+                and _HAS_WORD.search(line)):
+            continue
+        out.append(line)
+        prev_key = key
+    return "\n".join(out)
 
 
 # ── Adverts ───────────────────────────────────────────────────────────────────
@@ -686,7 +757,8 @@ def load_article(pdf_path: Path | str, verbose: bool = True) -> list[ArticleChun
 
     category      = _detect_category(text, pub_type)
     title, author = _extract_title_and_author(text)
-    sections      = _split_into_sections(text)
+    # Only now — the title detector reads the duplication this removes.
+    sections      = _split_into_sections(collapse_repeated_lines(text))
     base_citation = f"{pub_label} br. {month}/{year} — {title}"
 
     chunks: list[ArticleChunk] = []
