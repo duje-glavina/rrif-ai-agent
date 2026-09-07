@@ -24,26 +24,51 @@ THREE FIXES IN THIS REVISION
    filter is good enough) is exactly one call over ~20 pairs. The worst case
    is three calls but still ~20 pairs total, because nothing is scored twice.
 
-2. TEMPORAL FILTER NOW APPLIES TO MAGAZINE CHUNKS TOO
+2. TEMPORAL FILTER APPLIES TO STATUTE ONLY  (revised 7 Sep — I had this backwards)
 
-   The old WHERE clause read:
+   The original WHERE clause read:
 
        (source_type != 'članak' AND ({sql_time}) OR source_type = 'članak')
 
    Operator precedence makes that `(not članak AND time_ok) OR is članak`, so
-   every magazine chunk bypassed the time filter while statute had to satisfy
-   it. With 5,174 of 12,561 magazine chunks marked `nevazeci`, 41% of the
-   corpus competed on current-state questions with no temporal constraint —
-   which is why "Kolika je opća stopa PDV-a?" returned a 2014 article about
-   the old 13% rate, scoring 0.99.
+   magazine chunks bypassed the time filter entirely. I read that as a bug and
+   made the filter apply to everything, on the reasoning that `status =
+   'vazeci'` is satisfied by 7,387 magazine chunks so the exemption was never
+   needed.
 
-   The exemption existed because every magazine chunk has `valid_to` set
-   (none NULL), so a `valid_to IS NULL` test would delete the whole corpus.
-   But `sql_time` for a current question is `status = 'vazeci'`, and 7,387
-   magazine chunks satisfy that. The exemption was never needed.
+   Measured, that made retrieval worse:
 
-   TEMPORAL_MODE=strict (default) applies the filter to everything.
-   TEMPORAL_MODE=legacy restores the exemption, for A/B comparison.
+       ČLANCI top-1      83.9% exempt  vs  80.6% filtered
+       ČLANCI top-5      90.3%         vs  87.1%
+       ČLANCI src top-1  69.2%         vs  46.2%   (three questions)
+       avg rerank score  0.900         vs  0.818
+
+   Two reasons, and both are about the data model rather than the filter.
+
+   `status` is a legal property. A statute article is in force or superseded;
+   a magazine article is neither — a 2014 piece on how to book depreciation
+   was correct then and is correct now. `ingest_rrif_articles.py` stamps
+   everything published before 2019 as `nevazeci`, using legal validity as a
+   proxy for age, which hides 5,174 chunks of mostly still-correct method from
+   every current-state question.
+
+   Worse, `valid_to` is set to 31 December of the publication year. So on
+   "Koji je novi prag za ulazak u sustav PDV-a od 2025.?" the classifier asks
+   for date 2025-01-01, and the December 2024 issue — the issue where RRiF
+   publishes next year's changes — fails `valid_to >= 2025-01-01` and is
+   excluded. That question returned nothing at all under the filter, and five
+   correct chunks at 0.999 without it.
+
+   The cost is real but smaller: doh_001 now returns four 2014 chunks and
+   pushes the correct 2024 one out of the top 5. One question against three.
+   That trade gets worse as the archive fills in 2015–2023, which is the
+   argument for expressing recency as a ranking preference rather than as a
+   hard filter — see `recency_boost`, which the classifier emits and nothing
+   currently reads.
+
+   TEMPORAL_MODE=laws_only (default) filters statute by time, leaves magazine
+   chunks alone. TEMPORAL_MODE=all applies it to everything, for comparison.
+   The old names strict/legacy still work and mean all/laws_only respectively.
 
 3. CONNECTION POOLING AND A SINGLE CTE
 
@@ -61,7 +86,7 @@ THREE FIXES IN THIS REVISION
 EXPERIMENT HOOKS (all default to production behaviour)
 
   RETRIEVAL_MODE=tight|domain|wide   skip straight to a filter level
-  TEMPORAL_MODE=strict|legacy        see fix 2
+  TEMPORAL_MODE=laws_only|all        see fix 2
   FTS_CONFIG=simple|stem             lexical branch reads chunk_text (raw) or
                                      chunk_text_stem (lemmatised); the question
                                      is put through the same normaliser
@@ -106,9 +131,18 @@ RETRIEVAL_MODE = os.getenv("RETRIEVAL_MODE", "tight").lower()
 if RETRIEVAL_MODE not in {"tight", "domain", "wide"}:
     raise ValueError(f"RETRIEVAL_MODE must be tight|domain|wide, got {RETRIEVAL_MODE!r}")
 
-TEMPORAL_MODE = os.getenv("TEMPORAL_MODE", "strict").lower()
-if TEMPORAL_MODE not in {"strict", "legacy"}:
-    raise ValueError(f"TEMPORAL_MODE must be strict|legacy, got {TEMPORAL_MODE!r}")
+# laws_only (default) — the time filter applies to statute only.
+# all              — it applies to every source type.
+# strict/legacy are the previous names for all/laws_only; kept so older
+# commands and notes keep working, but the naming implied the wrong one was
+# correct, which the 7 Sep measurement reversed. See fix 2 above.
+_TEMPORAL_ALIASES = {"strict": "all", "legacy": "laws_only"}
+TEMPORAL_MODE = os.getenv("TEMPORAL_MODE", "laws_only").lower()
+TEMPORAL_MODE = _TEMPORAL_ALIASES.get(TEMPORAL_MODE, TEMPORAL_MODE)
+if TEMPORAL_MODE not in {"laws_only", "all"}:
+    raise ValueError(
+        f"TEMPORAL_MODE must be laws_only|all (or strict|legacy), got {TEMPORAL_MODE!r}"
+    )
 
 # Route B of the FTS experiment. The column name is interpolated into the SQL
 # string rather than bound as a parameter on purpose: the GIN index is built on
@@ -305,12 +339,14 @@ def _build_where(
         params["domain"] = domain
 
     if sql_time:
-        if TEMPORAL_MODE == "strict":
-            # Applies to every source type. See fix 2 in the module docstring.
+        if TEMPORAL_MODE == "all":
             clauses.append(f"({sql_time})")
         else:
+            # Statute is filtered by time; magazine chunks are not. Parenthesised
+            # explicitly — the original relied on AND binding tighter than OR,
+            # which is correct but reads as a bug and was treated as one.
             clauses.append(
-                f"(source_type <> 'članak' AND ({sql_time}) OR source_type = 'članak')"
+                f"((source_type <> 'članak' AND ({sql_time})) OR source_type = 'članak')"
             )
 
     return " AND ".join(clauses)
