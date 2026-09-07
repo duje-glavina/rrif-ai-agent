@@ -92,6 +92,8 @@ EXPERIMENT HOOKS (all default to production behaviour)
                                      is put through the same normaliser
   STEM_BACKEND=crude|classla|auto    which normaliser (see rag/stem_hr.py) —
                                      must match what the column was built with
+  TOP_K=<n>                          chunks handed to the generator (default 5);
+                                     raise it for corpora with smaller chunks
   ask(..., skip_generation=True)     stop after reranking, no Sonnet call
 """
 from __future__ import annotations
@@ -122,7 +124,12 @@ log = logging.getLogger(__name__)
 GENERATOR_MODEL         = "claude-sonnet-4-6"
 POOL_PER_RANKER         = 50   # rows each CTE branch contributes before fusion
 CANDIDATES              = 20   # candidates surviving fusion, sent to the reranker
-TOP_K                   = 5    # chunks handed to the generator
+# Chunks handed to the generator. Configurable because chunk size changed:
+# the v2 corpus averages ~349 tokens against v1's ~649, so TOP_K=5 gives the
+# generator roughly half the context it had before. Comparing two corpora at
+# the same K compares unequal amounts of text, which makes v2 look worse than
+# it is — the fair comparison is v1 at 5 against v2 at 10.
+TOP_K                   = int(os.getenv("TOP_K", "5"))
 RRF_K                   = 60
 MIN_FALLBACK_CANDIDATES = 5
 RERANK_THRESHOLD        = 0.75
@@ -282,6 +289,7 @@ class QueryResponse:
                 "retrieval_mode": RETRIEVAL_MODE,
                 "temporal_mode": TEMPORAL_MODE,
                 "fts_config": FTS_CONFIG,
+                "top_k": TOP_K,
                 "n_rerank_calls": self.n_rerank_calls,
                 "generation_skipped": self.generation_skipped,
             },
