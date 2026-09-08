@@ -84,6 +84,10 @@ Za svaku samostalnu činjeničnu tvrdnju u odgovoru (brojke, stope, rokovi, uvje
 
 Opće fraze bez činjeničnog sadržaja ("obratite se savjetniku", "ovisi o okolnostima") preskoči.
 
+NE ocjenjuj imena autora. Izvatci koje dobivaš ne sadrže podatak o autoru, pa ga ni ne možeš
+provjeriti — ime autora u odgovoru nikad ne označavaj kao unsupported. Autorstvo se provjerava
+zasebno (eval/check_authors.py).
+
 Vrati ISKLJUČIVO JSON, bez ikakvog teksta oko njega:
 {
   "claims": [
