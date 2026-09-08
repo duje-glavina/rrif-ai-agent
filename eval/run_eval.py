@@ -530,6 +530,21 @@ def evaluate_one(item: dict, *, skip_generation: bool, enable_rewrite: bool) -> 
 # Aggregation
 # ---------------------------------------------------------------------------
 
+def _prompt_hash() -> str:
+    """Which generator prompt produced this run.
+
+    Recorded for the same reason `database` is: two runs that differ only in
+    the system prompt are otherwise indistinguishable in the results files,
+    and the prompt is now a thing we edit. Without this, a comparison silently
+    attributes a prompt change to whatever else moved.
+    """
+    try:
+        from rag.generate.answerer import system_prompt_hash
+        return system_prompt_hash()
+    except Exception:
+        return "?"
+
+
 def _db_name() -> str:
     """Database name from DATABASE_URL, without the credentials."""
     from urllib.parse import urlparse
@@ -607,6 +622,7 @@ def aggregate(per_question: list[dict]) -> dict:
         # and the two are compared by swapping DATABASE_URL, a results file
         # with no record of which one it came from is worthless.
         "database": _db_name(),
+        "generator_prompt": _prompt_hash(),
     }
 
     in_corpus_with_cat = [
@@ -833,7 +849,8 @@ def main():
         print(f"  Chunks needed for answer:      "
               f"{metrics['avg_chunks_to_answer']:.2f}  (1.00 = whole answer at rank 1)")
     print(f"  Corpus:                        {metrics['database']}  "
-          f"(mode={metrics['retrieval_mode']}, fts={metrics['fts_config']})")
+          f"(mode={metrics['retrieval_mode']}, fts={metrics['fts_config']}, "
+          f"K={metrics.get('top_k')}, prompt={metrics.get('generator_prompt')})")
     print(f"  Avg latency:                   {metrics['avg_latency_ms']:.0f} ms")
     if metrics["avg_top_rerank_score"] is not None:
         print(f"  Avg top rerank score:          {metrics['avg_top_rerank_score']:.4f}")

@@ -53,6 +53,7 @@ def _config(run: dict) -> str:
         f"K={m.get('top_k', '?')}",
         f"mode={m.get('retrieval_mode', run.get('retrieval_mode', '?'))}",
         f"fts={m.get('fts_config', '?')}",
+        f"prompt={m.get('generator_prompt', '?')}",
         "gen" if not run.get("skip_generation") else "retrieval-only",
     ]
     return "  ".join(str(p) for p in parts)
