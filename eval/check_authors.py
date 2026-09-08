@@ -76,6 +76,23 @@ def _name_tokens(s: str) -> set[str]:
     }
 
 
+def _chunk_ids(row: dict) -> list[str]:
+    """The chunk ids behind one answer.
+
+    `QueryResponse` has `retrieved_chunk_ids`, but `evaluate_one` never copies
+    it into the per-question record — the ids only survive inside
+    `retrieved_meta[i]["chunk_id"]`. Reading the wrong key returned an empty
+    list for every question, which this script then reported as 74 unmatched
+    author attributions: a checker whose own input was missing, announcing a
+    catastrophe. Hence the fallback here and the hard guard in main().
+    """
+    ids = [m.get("chunk_id") for m in (row.get("retrieved_meta") or [])]
+    ids = [str(i) for i in ids if i]
+    if ids:
+        return ids
+    return [str(i) for i in (row.get("retrieved_chunk_ids") or []) if i]
+
+
 def _matches(claimed: str, actual: str) -> bool:
     """Do these name the same person?
 
@@ -112,7 +129,18 @@ def main() -> int:
         return 1
 
     # One query for every chunk in the run, rather than one per question.
-    all_ids = sorted({cid for r in rows for cid in (r.get("retrieved_chunk_ids") or [])})
+    all_ids = sorted({cid for r in rows for cid in _chunk_ids(r)})
+
+    # Guard, not politeness. With no ids this script would compare every
+    # author against an empty set and report every single one as unmatched —
+    # a false alarm indistinguishable from the real thing, on the one check
+    # where a false alarm is most expensive.
+    if not all_ids:
+        print("No chunk ids in this results file, so nothing can be verified.\n"
+              "Expected `chunk_id` inside `retrieved_meta`. Re-run the eval with a\n"
+              "current run_eval.py rather than trusting an empty result here.")
+        return 1
+
     authors: dict[str, tuple[str, str]] = {}
     with psycopg.connect(os.environ["DATABASE_URL"]) as conn:
         cur = conn.execute(
@@ -126,6 +154,13 @@ def main() -> int:
         for cid, author, source in cur.fetchall():
             authors[cid] = (author, source)
 
+    if not authors:
+        print(f"None of the {len(all_ids)} chunk ids in this run exist in "
+              f"{os.environ['DATABASE_URL'].rsplit('/', 1)[-1]}.\n"
+              "The results file and DATABASE_URL are pointing at different corpora —\n"
+              "verify against the database the run actually used.")
+        return 1
+
     missing_meta = sum(1 for cid in all_ids if not authors.get(cid, ("", ""))[0])
 
     n_attrib = 0
@@ -136,8 +171,7 @@ def main() -> int:
         claimed = list(dict.fromkeys(claimed))
         if not claimed:
             continue
-        available = [authors.get(cid, ("", ""))[0]
-                     for cid in (r.get("retrieved_chunk_ids") or [])]
+        available = [authors.get(cid, ("", ""))[0] for cid in _chunk_ids(r)]
         available = [a for a in available if a]
 
         for name in claimed:
