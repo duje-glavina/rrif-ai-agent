@@ -39,6 +39,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import re
 import sys
 from datetime import date
 from pathlib import Path
@@ -81,8 +82,21 @@ THIN = Side(style="thin", color="BFBFBF")
 BORDER = Border(left=THIN, right=THIN, top=THIN, bottom=THIN)
 
 
+# XML 1.0 forbids most C0 control characters, and openpyxl refuses to write
+# them rather than producing a file Excel would reject. Tab, newline and
+# carriage return are legal and must survive — they are the paragraph breaks
+# in the excerpts. Lone surrogates go too; they cannot be encoded.
+#
+# These characters are in the corpus: PDF text extraction leaves them behind,
+# and `clean_text()` in the article loader strips soft hyphens and NBSPs but
+# not these. Harmless for embedding and FTS, which is why nothing caught it
+# until something tried to write the text into a file format that validates.
+# Worth adding to `clean_text()` before the next ingest.
+_ILLEGAL = re.compile(r"[\x00-\x08\x0b\x0c\x0e-\x1f\ud800-\udfff]")
+
+
 def _clip(s: str, n: int = EXCEL_CELL_LIMIT) -> str:
-    s = s or ""
+    s = _ILLEGAL.sub(" ", s or "")
     return s if len(s) <= n else s[:n] + " […skraćeno…]"
 
 
@@ -221,7 +235,10 @@ def build_grading(wb: Workbook, rows: list[dict]) -> None:
             "", "", "", "",
         ]
         for col, v in enumerate(values, 1):
-            c = ws.cell(row=i, column=col, value=v)
+            # Sanitise at the point of writing, not per field: every string
+            # here comes from the corpus one way or another, and one missed
+            # call aborts the whole workbook at the last row.
+            c = ws.cell(row=i, column=col, value=_clip(v) if isinstance(v, str) else v)
             c.font = Font(name=FONT, size=10)
             c.alignment = Alignment(wrap_text=True, vertical="top")
             c.border = BORDER
@@ -271,7 +288,8 @@ def build_excerpts(wb: Workbook, rows: list[dict]) -> None:
                 _clip((m.get("chunk_text") or "").strip(), 8000),
             ]
             for col, v in enumerate(vals, 1):
-                c = ws.cell(row=r, column=col, value=v)
+                c = ws.cell(row=r, column=col,
+                            value=_clip(v) if isinstance(v, str) else v)
                 c.font = Font(name=FONT, size=9)
                 c.alignment = Alignment(wrap_text=True, vertical="top")
                 c.border = BORDER
