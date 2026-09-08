@@ -95,8 +95,34 @@ BORDER = Border(left=THIN, right=THIN, top=THIN, bottom=THIN)
 _ILLEGAL = re.compile(r"[\x00-\x08\x0b\x0c\x0e-\x1f\ud800-\udfff]")
 
 
+# The generator emits Markdown — **bold** headings, ## headers, `code`. The web
+# UI renders it (see renderMd() in the prototype), so this is not a defect to
+# fix in the prompt. But a spreadsheet cell renders nothing, and an advisor
+# reading "**Snižena stopa od 5%**" sees asterisks and concludes the output is
+# unfinished. Strip the markers, keep the text and the line structure.
+# Both delimiter rules require non-whitespace immediately inside, and no word
+# character immediately outside — the actual Markdown rule. Without it, "5 * 3"
+# and "2*2" parse as emphasis and the asterisks are deleted along with the
+# spaces, silently turning 5 * 3 into "5  3". Quietly altering a number in a
+# document an advisor is about to grade is worse than leaving an asterisk in.
+_MD_BOLD = re.compile(r"(?<!\w)\*\*(?!\s)(.+?)(?<!\s)\*\*(?!\w)", re.S)
+_MD_ITALIC = re.compile(r"(?<![*\w])\*(?!\s)([^*\n]+?)(?<!\s)\*(?![*\w])")
+_MD_CODE = re.compile(r"`([^`\n]+?)`")
+_MD_HEAD = re.compile(r"^#{1,6}\s*", re.M)
+_MD_RULE = re.compile(r"^\s*([-*_])\s*\1\s*\1[\s\-*_]*$", re.M)
+
+
+def _demarkdown(s: str) -> str:
+    s = _MD_RULE.sub("", s or "")
+    s = _MD_HEAD.sub("", s)
+    s = _MD_BOLD.sub(r"\1", s)
+    s = _MD_ITALIC.sub(r"\1", s)
+    s = _MD_CODE.sub(r"\1", s)
+    return s
+
+
 def _clip(s: str, n: int = EXCEL_CELL_LIMIT) -> str:
-    s = _ILLEGAL.sub(" ", s or "")
+    s = _demarkdown(_ILLEGAL.sub(" ", s or ""))
     return s if len(s) <= n else s[:n] + " […skraćeno…]"
 
 
