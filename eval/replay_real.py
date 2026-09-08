@@ -45,10 +45,17 @@ side.
 
 USAGE
 ─────
-    python -m eval.replay_real queries.csv feedback.csv
-    python -m eval.replay_real queries.csv feedback.csv --only-graded   # 19, ~$0.60
-    python -m eval.replay_real queries.csv feedback.csv --dedupe
-    python -m eval.replay_real queries.csv --limit 10
+    # on the Omen — reads the PoC log straight out of Postgres
+    python -m eval.replay_real --from-db rrif_rag --advisor rriftest3
+    python -m eval.replay_real --from-db rrif_rag --advisor rriftest3 --only-graded
+    python -m eval.replay_real --from-db rrif_rag --dedupe
+
+    # or from CSV exports, if the log is not on this machine
+    python -m eval.replay_real queries.csv feedback.csv --advisor rriftest3
+
+Note the two databases: --from-db names where the LOG lives (v1, because the
+PoC process started before the switch), while the replay itself retrieves from
+whatever DATABASE_URL currently points at (v2). That is the whole point.
 
 Writes eval/results/<ts>_replay_real.json in the same shape run_eval produces,
 so make_printable.py, check_authors.py and grade_answers.py all read it.
@@ -75,8 +82,64 @@ RESULTS_DIR.mkdir(parents=True, exist_ok=True)
 _TRUE = {"t", "true", "True", "1", "y", "yes"}
 
 
-def _b(v: str | None) -> bool:
-    return (v or "").strip() in _TRUE
+def _b(v) -> bool:
+    if isinstance(v, bool):
+        return v
+    return (v or "").strip() in _TRUE if isinstance(v, str) else bool(v)
+
+
+# ── Reading the log ──────────────────────────────────────────────────────────
+# The PoC writes to whatever DATABASE_URL pointed at when its process started,
+# which is the v1 database — the switch to v2 only affects processes started
+# after it. So the log and the corpus being replayed against are two different
+# databases, deliberately, and --from-db names the one holding the log.
+
+_Q_COLS = ("query_id", "created_at", "advisor_id", "question_text",
+           "classified_category", "referred_to_advisor", "answer_text",
+           "tokens_in", "tokens_out", "latency_ms")
+_F_COLS = ("feedback_id", "created_at", "query_id", "advisor_id", "rating",
+           "accuracy_verdict", "would_send_to_client", "failure_mode",
+           "comment", "suggested_answer")
+
+
+def _log_url(spec: str) -> str:
+    """A bare name is resolved against DATABASE_URL; a full URL is used as-is."""
+    if "://" in spec:
+        return spec
+    base = os.environ.get("DATABASE_URL")
+    if not base:
+        raise SystemExit("DATABASE_URL is not set, so a bare database name "
+                         "cannot be resolved. Pass a full connection URL.")
+    return base.rsplit("/", 1)[0] + "/" + spec
+
+
+def load_from_db(spec: str) -> tuple[list[dict], dict[str, dict]]:
+    import psycopg                                        # local: only this path needs it
+    url = _log_url(spec)
+    with psycopg.connect(url) as conn:
+        qs = conn.execute(
+            f"SELECT {', '.join(_Q_COLS)} FROM queries "
+            "WHERE question_text IS NOT NULL AND btrim(question_text) <> '' "
+            "ORDER BY created_at"
+        ).fetchall()
+        fs = conn.execute(
+            f"SELECT {', '.join(_F_COLS)} FROM feedback ORDER BY created_at"
+        ).fetchall()
+
+    def row(cols, r):
+        return {c: (v.isoformat(sep=" ") if hasattr(v, "isoformat") else v)
+                for c, v in zip(cols, r)}
+
+    queries = [row(_Q_COLS, r) for r in qs]
+    feedback = {}
+    for r in fs:                                # later rows win, as in the CSV path
+        d = row(_F_COLS, r)
+        feedback[str(d["query_id"])] = d
+    for q in queries:
+        q["query_id"] = str(q["query_id"])
+    print(f"  log: {len(queries)} pitanja, {len(feedback)} ocjena "
+          f"iz {url.rsplit('/', 1)[-1]}")
+    return queries, feedback
 
 
 def _i(v: str | None) -> int | None:
@@ -257,8 +320,13 @@ def report(rows: list[dict]) -> dict:
 def main() -> int:
     ap = argparse.ArgumentParser(
         description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
-    ap.add_argument("queries", help="CSV export of the `queries` table")
+    ap.add_argument("queries", nargs="?", help="CSV export of the `queries` table")
     ap.add_argument("feedback", nargs="?", help="CSV export of the `feedback` table")
+    ap.add_argument("--from-db", default="",
+                    help="Read the log straight from Postgres instead of CSVs. "
+                         "Give a database name (resolved against DATABASE_URL) or a "
+                         "full URL. The PoC logs to the database its process started "
+                         "with — v1 — so this is usually `rrif_rag`.")
     ap.add_argument("--advisor", default="",
                     help="Only this advisor_id. RRiF's own testing is `rriftest3` "
                          "(27 questions, 25 and 29 May); the rest of the log is ours.")
@@ -271,12 +339,22 @@ def main() -> int:
     ap.add_argument("--note", default="replay_real")
     args = ap.parse_args()
 
-    qpath = Path(args.queries)
-    if not qpath.exists():
-        print(f"Not found: {qpath}")
-        return 1
-    fb = load_feedback(Path(args.feedback) if args.feedback else None)
-    rows = load_queries(qpath)
+    if args.from_db:
+        rows, fb = load_from_db(args.from_db)
+        source = args.from_db
+    else:
+        if not args.queries:
+            print("Give a CSV export, or --from-db rrif_rag to read the log directly.")
+            return 1
+        qpath = Path(args.queries)
+        if not qpath.exists():
+            print(f"Not found: {qpath}\n"
+                  "The CSVs were exported to the laptop; on this machine use "
+                  "--from-db rrif_rag instead.")
+            return 1
+        fb = load_feedback(Path(args.feedback) if args.feedback else None)
+        rows = load_queries(qpath)
+        source = qpath.name
 
     if args.advisor:
         rows = [r for r in rows if r.get("advisor_id") == args.advisor]
@@ -323,7 +401,7 @@ def main() -> int:
     path = RESULTS_DIR / f"{ts}_{args.note}.json"
     path.write_text(json.dumps({
         "timestamp": ts, "note": args.note, "skip_generation": False,
-        "source_queries": qpath.name,
+        "source_queries": source,
         "metrics": metrics, "per_question": out,
     }, indent=2, ensure_ascii=False), encoding="utf-8")
     print(f"\n  → {path}")
