@@ -1,25 +1,36 @@
-"""Build an .xlsx of generated answers for a human expert to grade.
+"""Build an .xlsx of generated answers for a RRiF advisor to grade.
 
 WHY
 ───
 `grade_answers.py` measures whether an answer is faithful to the chunks it was
 built from. It cannot measure whether the answer is CORRECT about Croatian tax
-law, because that needs someone who knows Croatian tax law. That is the
-acceptance criterion, and it is the one thing we cannot produce ourselves.
+law. Neither can the keyword metric in `run_eval.py`: we wrote the questions
+AND the marking scheme, so a high score there means "the system said the words
+we decided counted", not "an advisor would send this to a client".
 
-RRiF can. And grading 31 answers is a far smaller ask than writing 200 new
-questions — it takes an advisor perhaps an hour, it needs no format spec, and
-it produces the acceptance number directly instead of an input to it. It also
-surfaces disagreements about what "correct" means while there is still time to
-act on them, rather than at handover.
+Only RRiF can produce the second number. `kriteriji_prihvacanja_faza1.docx`
+says exactly how: a four-point scale, two independent advisors per question, a
+third senior advisor resolving disagreements, and a separate "would you send
+this to a client?" field. This sheet is built to that spec, deliberately, so
+grading it is a DRY RUN OF THE ACCEPTANCE MEASUREMENT ITSELF — on our golden
+set, before the pilot, while there is still time to discover that two advisors
+disagree about what "točno" means. Section 4 of that document tracks the
+disagreement rate precisely because it expects this to be a problem.
 
-So: hand them this sheet, ask for the column marked `OCJENA`, and treat the
-result as the F1 accuracy figure.
+So the ask at the meeting is not "please grade some answers". It is: let us run
+your acceptance procedure once, now, on 31 questions, so that when it runs for
+real on 100 pilot questions nothing about it is a surprise.
+
+INDEPENDENCE
+────────────
+The document requires two advisors to grade each question INDEPENDENTLY. Build
+one sheet per advisor with --grader and send them separately. One shared file
+that both people type into is not the same measurement.
 
 USAGE
 ─────
-    python -m eval.make_review_sheet eval/results/<run>.json
-    python -m eval.make_review_sheet eval/results/<run>.json -o za_RRiF.xlsx
+    python -m eval.make_review_sheet eval/results/<run>.json --grader "Savjetnik A"
+    python -m eval.make_review_sheet eval/results/<run>.json --grader "Savjetnik B"
     python -m eval.make_review_sheet eval/results/<run>.json --include-zakoni
 
 Needs openpyxl:  pip install openpyxl
@@ -45,22 +56,23 @@ except ImportError:
 FONT = "Arial"
 EXCEL_CELL_LIMIT = 32_000        # real limit is 32,767; leave room for the ellipsis
 
-GRADES = [
-    "1 - točno",
-    "2 - djelomično",
-    "3 - netočno",
-    "4 - ne mogu ocijeniti",
-]
+# Verbatim from kriteriji_prihvacanja_faza1.docx, section 2. Do not "improve"
+# the wording: the whole point is that this sheet and the acceptance
+# measurement use the same four labels, so the dry run transfers.
+GRADES = ["Točno", "Djelomično točno", "Netočno", "Nije moguće ocijeniti"]
+
+# Section 2, the parallel business-usability field.
+SEND = ["Da", "Uz doradu", "Ne"]
 
 HEADERS = [
     ("id", 12),
-    ("Pitanje", 42),
-    ("Odgovor sustava", 78),
-    ("Izvori koje sustav navodi", 30),
-    ("OCJENA", 18),
-    ("Što nedostaje ili je krivo", 40),
-    ("Ispravan izvor (ako znate)", 28),
-    ("Ocjenjivač", 14),
+    ("Pitanje", 40),
+    ("Odgovor sustava", 72),
+    ("Izvori koje sustav navodi", 28),
+    ("OCJENA", 20),
+    ("Poslali biste klijentu?", 16),
+    ("Što nedostaje ili je krivo", 38),
+    ("Ispravan izvor (ako znate)", 26),
 ]
 
 HDR_FILL = PatternFill("solid", fgColor="1F3864")
@@ -78,11 +90,11 @@ def _sources_for(row: dict) -> str:
     """What the answer points at — with a fallback that matters.
 
     `Citation.source` is populated from the answerer's `law_name`, which is
-    None for magazine chunks. So for most of the corpus the citation objects
-    carry an empty source string even when the answer names the article in
-    prose. Falling back to the retrieved chunks' own `source` keeps the
-    grader able to check provenance; the label says which one they are
-    looking at, so nobody mistakes the fallback for a real citation.
+    None for magazine chunks, so the citation objects can carry an empty
+    source string even when the answer names the article in prose. Falling
+    back to the retrieved chunks' own `source` keeps the grader able to check
+    provenance; the label says which one they are looking at, so nobody
+    mistakes the fallback for a real citation.
     """
     cites = [c.get("source", "").strip()
              for c in (row.get("citations_raw") or [])]
@@ -110,45 +122,57 @@ def _style_header(ws, headers) -> None:
     ws.row_dimensions[1].height = 30
 
 
-def build_instructions(wb: Workbook, run_name: str, n: int) -> None:
+def build_instructions(wb: Workbook, run_name: str, n: int, grader: str) -> None:
     ws = wb.create_sheet("Upute", 0)
-    ws.column_dimensions["A"].width = 22
+    ws.column_dimensions["A"].width = 24
     ws.column_dimensions["B"].width = 96
 
     lines = [
-        ("RRiF AI — provjera odgovora", ""),
+        ("RRiF AI — probno ocjenjivanje", ""),
         ("", ""),
-        ("Što tražimo",
-         "Za svaki odgovor u listu «Ocjena» popunite žuto obojene stupce. "
-         "Najvažniji je stupac OCJENA."),
-        ("Koliko traje", f"{n} pitanja, otprilike sat vremena."),
+        ("Ocjenjivač", grader or "(upišite ime)"),
+        ("Broj pitanja", str(n)),
+        ("Procjena vremena", "oko sat vremena"),
         ("", ""),
-        ("Ljestvica", ""),
-        ("1 - točno",
-         "Odgovor je stručno ispravan i potpun. Savjetnik bi ga mogao poslati pretplatniku "
-         "uz manje jezične dorade."),
-        ("2 - djelomično",
-         "Ništa u odgovoru nije pogrešno, ali nešto bitno nedostaje, ili je preopćenito "
-         "da bi bilo korisno."),
-        ("3 - netočno",
-         "Odgovor sadrži tvrdnju koja nije točna, ili se poziva na propis koji ne kaže to. "
-         "Ovo je jedina ocjena koja nas stvarno zabrinjava — molimo upišite što je krivo."),
-        ("4 - ne mogu ocijeniti",
-         "Pitanje je loše postavljeno, dvosmisleno, ili izvan Vašeg područja. "
-         "Nije greška sustava."),
+        ("Zašto ovo radimo",
+         "Skala, postupak i polje «poslali biste klijentu» preuzeti su doslovno iz "
+         "dokumenta «Prijedlog kriterija prihvaćanja Faze 1». Ovo je probna provedba "
+         "tog istog postupka — na 31 pitanje, prije pilota — da se eventualna "
+         "neslaganja oko toga što znači «točno» pojave sada, a ne na kraju Faze 1."),
+        ("Važno",
+         "Ocjenjujte neovisno. Ovaj primjerak je Vaš; drugi savjetnik ocjenjuje isti "
+         "skup u zasebnoj datoteci. Neslaganja su korisna informacija, ne problem."),
+        ("", ""),
+        ("Skala (iz kriterija)", ""),
+        ("Točno",
+         "Odgovor je činjenično ispravan, citira ispravan izvor, i mogli biste ga bez "
+         "izmjene koristiti u radu s klijentom."),
+        ("Djelomično točno",
+         "Suština je ispravna, ali nedostaje članak ili dio citata, formulacija je "
+         "nejasna, ili nedostaje nijansa koju biste dodali. Upotrebljivo uz manju doradu."),
+        ("Netočno",
+         "Odgovor je činjenično pogrešan, citira pogrešan izvor, izmišlja sadržaj koji "
+         "ne postoji, ili biste ga morali odbaciti i napisati ispočetka."),
+        ("Nije moguće ocijeniti",
+         "Pitanje izlazi izvan opsega Faze 1 — tema nije pokrivena bazom znanja ili "
+         "traženi propis nije u korpusu. Ne ulazi u izračun točnosti."),
+        ("", ""),
+        ("Poslali biste klijentu?",
+         "Da / Uz doradu / Ne. Prati se odvojeno od ocjene, kao pokazatelj stvarne "
+         "poslovne upotrebljivosti."),
         ("", ""),
         ("Izvori",
          "Stupac «Izvori» pokazuje na što se sustav pozvao. Ako je odgovor točan ali je "
-         "izvor pogrešan, to je ocjena 2, a ne 1 — i upišite ispravan izvor."),
+         "izvor pogrešan, to je «Djelomično točno» — i upišite ispravan izvor."),
         ("Izvatci",
-         "List «Izvatci» sadrži tekst koji je sustav pročitao prije nego je odgovorio. "
-         "Koristan je kad želite vidjeti odakle mu nešto — ali nemojte po njemu ocjenjivati. "
-         "Ocjenjujete odgovor, ne izvadak."),
+         "List «Izvatci» sadrži tekst koji je sustav pročitao prije odgovora. Koristan je "
+         "kad želite vidjeti odakle mu je nešto došlo, ali nemojte po njemu ocjenjivati: "
+         "ocjenjujete odgovor, ne izvadak."),
         ("", ""),
-        ("Napomena",
-         "Sustav je u ovoj fazi ograničen na članke iz RRiF-a i PiP-a. Zakonski tekstovi "
-         "dolaze u sljedećoj fazi, pa odgovore koji bi trebali citirati zakon ocijenite "
-         "prema onome što članak kaže."),
+        ("Opseg",
+         "Sustav je u Fazi 1 ograničen na članke iz RRiF-a i PiP-a; zakonski tekstovi "
+         "dolaze u Fazi 2. Ako odgovor rješava pitanje iz članka umjesto iz zakona, to "
+         "nije greška — ali nam je vrlo korisno znati je li Vam takav odgovor dovoljan."),
         ("", ""),
         ("Izvor podataka", run_name),
         ("Datum", date.today().isoformat()),
@@ -166,12 +190,12 @@ def build_instructions(wb: Workbook, run_name: str, n: int) -> None:
     ws.cell(row=r, column=1, value="Primjer ispunjenog retka").font = Font(
         name=FONT, bold=True, size=11)
     example = [
-        ("OCJENA", "2 - djelomično"),
+        ("OCJENA", "Djelomično točno"),
+        ("Poslali biste klijentu?", "Uz doradu"),
         ("Što nedostaje ili je krivo",
          "Stopa je točna, ali ne spominje da se od 1.1.2024. primjenjuje i na "
          "isporuku i ugradnju."),
         ("Ispravan izvor", "RRiF br. 1/2024, str. 41"),
-        ("Ocjenjivač", "M. K."),
     ]
     for j, (a, b) in enumerate(example, r + 1):
         ws.cell(row=j, column=1, value=a).font = Font(name=FONT, italic=True, size=10)
@@ -206,16 +230,25 @@ def build_grading(wb: Workbook, rows: list[dict]) -> None:
         ws.row_dimensions[i].height = 96
 
     last = len(rows) + 1
-    dv = DataValidation(
-        type="list",
-        formula1='"' + ",".join(GRADES) + '"',
-        allow_blank=True,
-        showDropDown=False,          # False = show the dropdown arrow (openpyxl inverts this)
-    )
-    dv.error = "Odaberite jednu od ponuđenih ocjena."
-    dv.errorTitle = "Neispravna ocjena"
-    ws.add_data_validation(dv)
-    dv.add(f"E2:E{last}")
+
+    # showDropDown=False shows the arrow. openpyxl passes this attribute
+    # straight through to the XML, where it means "suppress the dropdown" —
+    # so the sensible-looking True is the one that hides it.
+    dv_grade = DataValidation(
+        type="list", formula1='"' + ",".join(GRADES) + '"',
+        allow_blank=True, showDropDown=False)
+    dv_grade.errorTitle = "Neispravna ocjena"
+    dv_grade.error = "Odaberite jednu od četiri ocjene iz kriterija prihvaćanja."
+    ws.add_data_validation(dv_grade)
+    dv_grade.add(f"E2:E{last}")
+
+    dv_send = DataValidation(
+        type="list", formula1='"' + ",".join(SEND) + '"',
+        allow_blank=True, showDropDown=False)
+    dv_send.errorTitle = "Neispravna vrijednost"
+    dv_send.error = "Da, Uz doradu, ili Ne."
+    ws.add_data_validation(dv_send)
+    dv_send.add(f"F2:F{last}")
 
     ws.freeze_panes = "B2"
     ws.auto_filter.ref = f"A1:H{last}"
@@ -229,8 +262,7 @@ def build_excerpts(wb: Workbook, rows: list[dict]) -> None:
 
     r = 2
     for row in rows:
-        meta = row.get("retrieved_meta") or []
-        for n, m in enumerate(meta, 1):
+        for n, m in enumerate(row.get("retrieved_meta") or [], 1):
             vals = [
                 row.get("id", "") if n == 1 else "",
                 row.get("query", "") if n == 1 else "",
@@ -255,6 +287,8 @@ def main() -> int:
         formatter_class=argparse.RawDescriptionHelpFormatter)
     ap.add_argument("results", help="eval/results/<run>.json from a generation run")
     ap.add_argument("-o", "--out", default="", help="Output .xlsx (default: alongside input)")
+    ap.add_argument("--grader", default="",
+                    help="Name of the advisor this copy is for — build one per advisor")
     ap.add_argument("--include-zakoni", action="store_true",
                     help="Include the PDV-law questions (out of F1 scope by default)")
     ap.add_argument("--include-traps", action="store_true",
@@ -288,13 +322,23 @@ def main() -> int:
 
     wb = Workbook()
     wb.remove(wb.active)                      # drop the default empty sheet
-    build_instructions(wb, src.name, len(rows))
+    build_instructions(wb, src.name, len(rows), args.grader)
     build_grading(wb, rows)
     build_excerpts(wb, rows)
 
-    out = Path(args.out) if args.out else src.with_suffix(".pregled.xlsx")
+    if args.out:
+        out = Path(args.out)
+    else:
+        suffix = f".pregled_{args.grader.replace(' ', '_')}.xlsx" if args.grader \
+            else ".pregled.xlsx"
+        out = src.with_suffix(suffix)
     wb.save(out)
-    print(f"  → {out}   ({len(rows)} pitanja)")
+    print(f"  → {out}   ({len(rows)} pitanja"
+          f"{', ocjenjivač: ' + args.grader if args.grader else ''})")
+    if not args.grader:
+        print("\n  Bez --grader gradite jedan zajednički primjerak. Kriteriji traže\n"
+              "  DVA neovisna ocjenjivača — napravite dvije datoteke i pošaljite ih\n"
+              "  odvojeno, inače mjerite nešto drugo.")
     print("\n  Prije slanja: otvorite ga i pročitajte 3 odgovora. Ako Vas neki\n"
           "  posrami, popravite to prije nego ga vide, ne poslije.")
     return 0
