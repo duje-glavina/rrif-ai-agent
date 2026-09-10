@@ -126,9 +126,22 @@ def load_from_db(spec: str) -> tuple[list[dict], dict[str, dict]]:
             f"SELECT {', '.join(_F_COLS)} FROM feedback ORDER BY created_at"
         ).fetchall()
 
+    def _safe(v):
+        """Anything psycopg hands back must survive json.dumps.
+
+        Datetimes were handled; UUIDs were not, and the whole run died at the
+        write step after every API call had already been paid for. Coerce at
+        the boundary rather than at each use site — the next column type that
+        is not JSON-native will otherwise do the same thing again.
+        """
+        if v is None or isinstance(v, (str, int, float, bool)):
+            return v
+        if hasattr(v, "isoformat"):
+            return v.isoformat(sep=" ")
+        return str(v)
+
     def row(cols, r):
-        return {c: (v.isoformat(sep=" ") if hasattr(v, "isoformat") else v)
-                for c, v in zip(cols, r)}
+        return {c: _safe(v) for c, v in zip(cols, r)}
 
     queries = [row(_Q_COLS, r) for r in qs]
     feedback = {}

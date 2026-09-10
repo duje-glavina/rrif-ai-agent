@@ -156,6 +156,7 @@ def main() -> int:
         hist = [((h.get("question_text") or ""), (h.get("answer_text") or ""))
                 for h in history]
 
+        fbr = fb.get(str(r.get("query_id")))
         c = condense(hist, q)
         print(f"[{n}/{len(targets)}] {q[:72]}")
         print(f"          ↳ {c.standalone[:100]}")
@@ -186,7 +187,11 @@ def main() -> int:
             "v1": {"refused": _b(r.get("referred_to_advisor")),
                    "answer": r.get("answer_text") or "",
                    "asked_at": str(r.get("created_at"))},
-            "feedback": fb.get(str(r.get("query_id")), {}) or None,
+            # Named fields only. Copying a whole DB row into JSON is how the
+            # UUID got in here in the first place.
+            "feedback": {k: (fbr or {}).get(k) for k in
+                         ("accuracy_verdict", "would_send_to_client",
+                          "failure_mode", "comment", "advisor_id")} if fbr else None,
         })
 
     recovered = [o for o in out if o["v1"]["refused"] and not o["refused"]]
