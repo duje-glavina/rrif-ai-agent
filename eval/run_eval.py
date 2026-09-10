@@ -216,6 +216,19 @@ def _mean(values: list) -> float | None:
     return sum(vals) / len(vals) if vals else None
 
 
+def _quantile(values: list, q: float) -> float | None:
+    """Nearest-rank percentile.
+
+    A mean latency hides the shape entirely: 24 s average can be every answer
+    taking 24 s, or most taking 8 and a few taking 90. Only the second is a
+    problem worth solving, and only percentiles tell them apart.
+    """
+    vals = sorted(v for v in values if v is not None)
+    if not vals:
+        return None
+    return float(vals[min(len(vals) - 1, max(0, int(round(q * len(vals))) - 1))])
+
+
 # ---------------------------------------------------------------------------
 # Core evaluation
 # ---------------------------------------------------------------------------
@@ -522,6 +535,12 @@ def evaluate_one(item: dict, *, skip_generation: bool, enable_rewrite: bool) -> 
         "rewritten_query": result.rewritten_query,
         "rewrite_changed": result.rewrite_changed,
         "latency_ms": result.latency_ms,
+        # Kept per question, not just aggregated into cost. Without these the
+        # only way to ask "is the wait the model or the answer length" is to
+        # infer it from two averages, which is how we spent an evening guessing.
+        "tokens_in": result.tokens_in,
+        "tokens_out": result.tokens_out,
+        "timings_ms": getattr(result, "timings", {}) or {},
         "cost_usd": cost,
     }
 
@@ -663,6 +682,20 @@ def aggregate(per_question: list[dict]) -> dict:
             [r["keyword_hits_exact"] / r["keyword_total"] for r in ans_all
              if r.get("keyword_total") and r.get("keyword_hits_exact") is not None]
         )
+        # ── Where the time and the tokens actually go ───────────────────────
+        lat = [r["latency_ms"] for r in per_question]
+        metrics["latency_p50_ms"] = _quantile(lat, 0.50)
+        metrics["latency_p90_ms"] = _quantile(lat, 0.90)
+        metrics["latency_max_ms"] = max((v for v in lat if v is not None), default=None)
+        metrics["tokens_in_p50"] = _quantile([r.get("tokens_in") for r in per_question], 0.50)
+        metrics["tokens_out_p50"] = _quantile([r.get("tokens_out") for r in per_question], 0.50)
+        metrics["tokens_out_p90"] = _quantile([r.get("tokens_out") for r in per_question], 0.90)
+        for phase in ("classify", "retrieve_rerank", "generate"):
+            metrics[f"t_{phase}_p50_ms"] = _quantile(
+                [(r.get("timings_ms") or {}).get(phase) for r in per_question], 0.50)
+        metrics["out_tok_per_s_p50"] = _quantile(
+            [(r.get("timings_ms") or {}).get("out_tok_per_s") for r in per_question], 0.50)
+
         metrics["avg_citations_per_answer"] = _mean(
             [r["n_citations"] for r in in_corpus]
         )
@@ -835,6 +868,29 @@ def main():
         if metrics.get("avg_citations_per_answer") is not None:
             print(f"  Prosječno izvora po odgovoru:       {metrics['avg_citations_per_answer']:.1f}"
                   f"   (bez ijednog izvora: {metrics['answers_with_no_citation']})")
+        if metrics.get("latency_p50_ms"):
+            print()
+            print("  ── vrijeme i tokeni ──")
+            print(f"  Trajanje p50 / p90 / max:           "
+                  f"{metrics['latency_p50_ms']/1000:.1f} / "
+                  f"{metrics['latency_p90_ms']/1000:.1f} / "
+                  f"{metrics['latency_max_ms']/1000:.1f} s")
+            parts = [(k, metrics.get(f"t_{k}_p50_ms")) for k in
+                     ("classify", "retrieve_rerank", "generate")]
+            parts = [(k, v) for k, v in parts if v is not None]
+            if parts:
+                total = sum(v for _, v in parts) or 1
+                print("  Po fazama (p50):                    "
+                      + "   ".join(f"{k}={v/1000:.1f}s ({v/total:.0%})" for k, v in parts))
+            print(f"  Izlaznih tokena p50 / p90:          "
+                  f"{metrics['tokens_out_p50']:.0f} / {metrics['tokens_out_p90']:.0f}"
+                  f"   (ulaznih p50: {metrics['tokens_in_p50']:.0f})")
+            if metrics.get("out_tok_per_s_p50"):
+                print(f"  Brzina generiranja (p50):           "
+                      f"{metrics['out_tok_per_s_p50']:.0f} tok/s")
+                print("  → Ako je 'generate' većina vremena, čeka se duljina odgovora,")
+                print("    a ne brzina modela. Streaming mijenja doživljaj, ne ukupno vrijeme.")
+
         gap = None
         if metrics.get("content_top_k_clanci") is not None and metrics.get("answer_kw_all_clanci") is not None:
             gap = metrics["content_top_k_clanci"] - metrics["answer_kw_all_clanci"]

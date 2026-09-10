@@ -189,6 +189,130 @@ def _meaningfully_different(original: str, rewritten: str) -> bool:
     return _normalise(original) != _normalise(rewritten)
 
 
+# ═══════════════════════════════════════════════════════════════════════════
+# Conversation condensation
+# ═══════════════════════════════════════════════════════════════════════════
+# RRiF's own advisor asked four follow-up questions inside one conversation on
+# 29 May — "Treba li ga primijeniti…", "Daj mi primjer te detaljnije analize
+# F. Plišića", "Iz prethodnog pitanja koje sam postavio" — and every one was
+# refused. Not because retrieval failed but because there is nothing to
+# retrieve on: "ga" and "te" and "prethodnog" carry the entire meaning and none
+# of it is in the text.
+#
+# Passing history to the GENERATOR does not fix this. The embedding and the FTS
+# query are built from the question alone, so the search happens before any
+# history could help. The follow-up has to become a standalone question BEFORE
+# classification — which is the rewriter's job, with more context.
+#
+# Deliberately separate from rewrite(): that one must never add specificity the
+# user did not supply (rule C). This one exists precisely to add specificity —
+# but only what the conversation already contains.
+
+CONDENSE_MAX_TOKENS = 300
+_HISTORY_TURNS = 4          # further back adds cost and rarely adds meaning
+_ANSWER_CLIP = 700          # enough to identify what was discussed
+
+
+CONDENSE_SYSTEM = """Ti pretvaraš pitanje iz razgovora u samostalno pitanje koje se može razumjeti bez razgovora.
+
+NIKADA NE ODGOVARAJ NA PITANJE. Vraćaš samo preoblikovano pitanje.
+
+Dobivaš prethodne izmjene u razgovoru i posljednje korisnikovo pitanje. Zadatak:
+
+1. Razriješi sve što upućuje na prethodni tijek razgovora — zamjenice ("ga", "to", "te"), pokazne izraze ("iz prethodnog pitanja", "ona analiza"), i izostavljeni predmet. Umjesto njih upiši ono na što se odnose.
+2. Koristi ISKLJUČIVO ono što se u razgovoru već spominje. Ne dodaji propise, godine, iznose ni nazive kojih u razgovoru nema.
+3. Ako je posljednje pitanje već samostalno i razumljivo bez razgovora, vrati ga NEPROMIJENJENO.
+4. Zadrži formalni hrvatski jezik i stručnu terminologiju iz razgovora.
+5. Vrati JEDNU rečenicu — samo pitanje, bez navodnika, bez objašnjenja, bez prefiksa.
+
+Primjeri:
+
+Razgovor: "Tko mora primijeniti zahtjeve HSFI-ja 18?" → (odgovor o HSFI 18)
+Pitanje: "Treba li ga primijeniti društvo koje prestaje po skraćenom postupku brisanja bez likvidacije?"
+ISPRAVNO: Treba li društvo koje prestaje po skraćenom postupku brisanja bez likvidacije primijeniti zahtjeve HSFI-ja 18?
+
+Razgovor: "Mora li se obračunati PDV na reprezentaciju u ugostiteljstvu?" → (odgovor koji spominje analizu F. Plišića)
+Pitanje: "Daj mi primjer te detaljnije analize F. Plišića"
+ISPRAVNO: Kakva je detaljnija analiza F. Plišića o obračunu PDV-a na reprezentaciju u ugostiteljstvu?
+
+Razgovor: "Kolika je minimalna plaća u Hrvatskoj?" → (odgovor)
+Pitanje: "Kolika je stopa PDV-a na knjige?"
+ISPRAVNO: Kolika je stopa PDV-a na knjige?"""
+
+
+@dataclass
+class CondenseResult:
+    original: str
+    standalone: str
+    changed: bool
+    n_turns: int
+    input_tokens: int
+    output_tokens: int
+    model: str
+    error: str | None = None
+
+
+def condense(history: list[tuple[str, str]], question: str) -> CondenseResult:
+    """Turn a follow-up into a question that stands on its own.
+
+    `history` is [(question, answer), …] oldest first. Only the last few turns
+    are used, and answers are clipped — the point is to identify the subject
+    under discussion, not to re-read it.
+
+    Falls back to the original question on any failure. A condenser that
+    breaks must not take the pipeline with it.
+    """
+    def _fail(err: str) -> CondenseResult:
+        return CondenseResult(question, question, False, len(history or []),
+                              0, 0, REWRITER_MODEL, err)
+
+    if not history:
+        return CondenseResult(question, question, False, 0, 0, 0, REWRITER_MODEL)
+
+    api_key = os.environ.get("ANTHROPIC_API_KEY")
+    if not api_key:
+        return _fail("ANTHROPIC_API_KEY not set")
+
+    turns = history[-_HISTORY_TURNS:]
+    lines = []
+    for i, (q, a) in enumerate(turns, 1):
+        lines.append(f"[{i}] Korisnik: {(q or '').strip()}")
+        ans = (a or "").strip().replace("\n", " ")
+        if ans:
+            clipped = ans[:_ANSWER_CLIP] + ("…" if len(ans) > _ANSWER_CLIP else "")
+            lines.append(f"    Sustav: {clipped}")
+    user = ("RAZGOVOR DO SADA:\n" + "\n".join(lines)
+            + f"\n\nPOSLJEDNJE PITANJE: {question.strip()}")
+
+    try:
+        client = anthropic.Anthropic(api_key=api_key, timeout=15.0)
+        resp = client.messages.create(
+            model=REWRITER_MODEL,
+            max_tokens=CONDENSE_MAX_TOKENS,
+            temperature=0,
+            system=CONDENSE_SYSTEM,
+            messages=[{"role": "user", "content": user}],
+        )
+        out = resp.content[0].text.strip().strip('"').strip("'").strip()
+        for prefix in ("ISPRAVNO:", "Pitanje:", "Samostalno pitanje:"):
+            if out.startswith(prefix):
+                out = out[len(prefix):].strip()
+        if len(out) < 5:
+            log.warning("Condenser returned suspiciously short output: %r", out)
+            out = question
+        return CondenseResult(
+            original=question, standalone=out,
+            changed=_meaningfully_different(question, out),
+            n_turns=len(turns),
+            input_tokens=resp.usage.input_tokens,
+            output_tokens=resp.usage.output_tokens,
+            model=REWRITER_MODEL,
+        )
+    except Exception as exc:                                     # noqa: BLE001
+        log.warning("Condenser API call failed: %s", exc)
+        return _fail(str(exc))
+
+
 # ── CLI smoke test ────────────────────────────────────────────────────────────
 
 if __name__ == "__main__":

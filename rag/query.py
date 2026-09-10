@@ -258,6 +258,9 @@ class QueryResponse:
     retrieved_meta: list[dict] = field(default_factory=list)
     generation_skipped: bool = False
     n_rerank_calls: int = 0
+    # Milliseconds per stage. Without this, "24 seconds" is one number with no
+    # parts, and every conversation about it is guesswork — as ours was.
+    timings: dict = field(default_factory=dict)
 
     def to_dict(self) -> dict:
         return {
@@ -291,6 +294,7 @@ class QueryResponse:
                 "fts_config": FTS_CONFIG,
                 "top_k": TOP_K,
                 "n_rerank_calls": self.n_rerank_calls,
+                "timings_ms": self.timings,
                 "generation_skipped": self.generation_skipped,
             },
         }
@@ -628,12 +632,17 @@ def ask(
             marker = "(changed)" if rw.changed else "(unchanged)"
             print(f"[rewriter] {marker} → {rw.rewritten!r}")
 
+    _t = time.perf_counter()
     clf = classify(question)
+    timings = {"rewrite": int((_t - t_start) * 1000) if enable_rewrite else 0}
+    timings["classify"] = int((time.perf_counter() - _t) * 1000)
     if verbose:
         print(f"[classifier] domain={clf.domain} subdomains={clf.subdomains} | "
               f"time={clf.time_period.type} | recency={clf.recency_boost}")
 
+    _t = time.perf_counter()
     top_chunks, scores, n_calls = _retrieve_and_rank(question, clf)
+    timings["retrieve_rerank"] = int((time.perf_counter() - _t) * 1000)
     if verbose:
         print(f"[retrieval] {len(top_chunks)} chunks "
               f"(mode={RETRIEVAL_MODE}, temporal={TEMPORAL_MODE}, "
@@ -657,6 +666,8 @@ def ask(
             rewrite_changed=rewrite_changed,
             generation_skipped=skip_generation,
             n_rerank_calls=n_calls,
+            timings={**timings, "generate": 0,
+                     "total": int((time.perf_counter() - t_start) * 1000)},
         )
 
     if skip_generation:
@@ -670,7 +681,9 @@ def ask(
             generation_skipped=True,
         )
     else:
+        _t = time.perf_counter()
         result = _generate(question, top_chunks, clf)
+        timings["generate"] = int((time.perf_counter() - _t) * 1000)
 
     result.latency_ms = int((time.perf_counter() - t_start) * 1000)
     result.original_query = original_query
@@ -680,8 +693,17 @@ def ask(
     result.retrieved_scores = [scores.get(str(r[0]), 0.0) for r in top_chunks]
     result.retrieved_meta = _meta(top_chunks, scores)
     result.n_rerank_calls = n_calls
+    timings["total"] = result.latency_ms
+    # Tokens per second of generation. The only figure that says whether the
+    # wait is the model being slow or the answer being long — and it is almost
+    # always the second.
+    if timings.get("generate") and result.tokens_out:
+        timings["out_tok_per_s"] = round(
+            result.tokens_out / (timings["generate"] / 1000), 1)
+    result.timings = timings
 
     if verbose and not skip_generation:
+        print(f"[timings] " + "  ".join(f"{k}={v}" for k, v in result.timings.items()))
         print(f"[generator] confidence={result.confidence} | "
               f"citations={len(result.citations)} | "
               f"latency={result.latency_ms}ms | "
