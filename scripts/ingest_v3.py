@@ -74,6 +74,49 @@ sys.path.insert(0, str(Path(__file__).parent.parent))
 LOG_DIR = Path("eval/results")
 
 
+# ── Extraction ────────────────────────────────────────────────────────────────
+#
+# Measured on the first full dry run: 1.4 s per article, single-threaded, which
+# is 3 hours for 7,900 articles — and the GPU never wakes up, because none of
+# this is embedding. It is pymupdf opening each file twice (once for text, once
+# for the layout title scan) and the tokenizer counting tokens for ~30 chunks.
+#
+# All of it is per-file and shares nothing, so it goes in a process pool. The
+# embedding and the database stay in the parent: one CUDA context, one
+# connection, and results arriving in manifest order.
+
+def _extract_one(task: tuple[str, str]) -> tuple[str, list | None, float, str | None]:
+    """Worker: load and chunk one article. Must be module-level to be picklable."""
+    path, unit_ref = task
+    # Imported here rather than at module scope so that a parent doing --dry-run
+    # only pays for it in the workers, and so each worker imports it once.
+    from rag.ingest.article_loader import load_article
+    t = time.perf_counter()
+    try:
+        chunks = load_article(Path(path), verbose=False)
+        err = None
+    except Exception as e:                                       # noqa: BLE001
+        chunks, err = None, f"{type(e).__name__}: {e}"
+    return unit_ref, chunks, time.perf_counter() - t, err
+
+
+def extract_all(rows: list[dict], workers: int):
+    """Yield (row, chunks, seconds, error) in manifest order."""
+    tasks = [(str(r["path"]), r["unit_ref"]) for r in rows]
+    if workers <= 1:
+        for row, task in zip(rows, tasks):
+            _, chunks, dt, err = _extract_one(task)
+            yield row, chunks, dt, err
+        return
+    from concurrent.futures import ProcessPoolExecutor
+    with ProcessPoolExecutor(max_workers=workers) as ex:
+        # chunksize batches tasks per worker round-trip; 4 keeps the pool busy
+        # without letting one slow file stall a large block. map() preserves
+        # order, which is what keeps the JSONL readable against the manifest.
+        for row, (_, chunks, dt, err) in zip(rows, ex.map(_extract_one, tasks, chunksize=4)):
+            yield row, chunks, dt, err
+
+
 # ── Manifest ──────────────────────────────────────────────────────────────────
 
 def load_manifest(path: Path, include_mismatch: bool) -> list[dict]:
@@ -198,6 +241,10 @@ def main() -> int:
                     help="Chunks accumulated before an embed+insert flush (default 512)")
     ap.add_argument("--embed-batch", type=int, default=128,
                     help="Chunks per forward pass (default 128; lower it on CUDA OOM)")
+    ap.add_argument("--workers", type=int, default=max(1, (os.cpu_count() or 4) - 2),
+                    help="Processes for PDF extraction and chunking — the single "
+                         "slowest phase, and the only one that is not GPU or DB "
+                         "bound (default: cores minus 2). Use 1 to profile.")
     ap.add_argument("--no-classify", action="store_true",
                     help="Leave domain/subdomain NULL. Saves ~7,750 Haiku calls.")
     ap.add_argument("--resume", action="store_true",
@@ -239,8 +286,8 @@ def main() -> int:
     print(f"{'='*70}\n")
 
     # Imports are deferred so that --dry-run neither loads a 2 GB model nor
-    # needs a database to be reachable.
-    from rag.ingest.article_loader import load_article
+    # needs a database to be reachable. The article loader is imported inside
+    # the extraction workers instead.
     if not args.dry_run:
         import numpy as np
         import psycopg
@@ -308,24 +355,20 @@ def main() -> int:
         n_inserted += len(params)
         pending = []
 
-    for i, r in enumerate(rows, 1):
-        pdf = r["path"]
+    for i, (r, chunks, dt, err) in enumerate(extract_all(rows, args.workers), 1):
         rec: dict = {"unit_ref": r["unit_ref"], "pub": r["pub_code"],
                      "year": int(r["year"]), "month": int(r["month"]),
                      "rel_path": r["rel_path"]}
-
-        t = time.perf_counter()
-        try:
-            chunks = load_article(pdf, verbose=False)
-        except Exception as e:                                  # noqa: BLE001
-            timers.add("ekstrakcija", time.perf_counter() - t)
-            errors.append((r["unit_ref"], f"{type(e).__name__}: {e}"))
-            rec |= {"ok": False, "error": str(e)[:200]}
-            log.write(json.dumps(rec, ensure_ascii=False) + "\n")
-            continue
-        dt = time.perf_counter() - t
+        # Worker CPU time, which with --workers > 1 sums to more than the wall
+        # clock. That is the point; the "ostalo" line below carries the rest.
         timers.add("ekstrakcija", dt)
         rec["ms_extract"] = round(dt * 1000, 1)
+
+        if err:
+            errors.append((r["unit_ref"], err))
+            rec |= {"ok": False, "error": err[:200]}
+            log.write(json.dumps(rec, ensure_ascii=False) + "\n")
+            continue
 
         if not chunks:
             n_skipped += 1
