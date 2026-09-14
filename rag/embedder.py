@@ -27,17 +27,29 @@ def _get_model() -> SentenceTransformer:
     return model
 
 
-def embed_passages(texts: Iterable[str]) -> np.ndarray:
+def embed_passages(
+    texts: Iterable[str],
+    batch_size: int | None = None,
+    show_progress: bool = True,
+) -> np.ndarray:
     """Embed document chunks for storage in the knowledge base.
     Returns a (N, 1024) numpy array of L2-normalised vectors.
+
+    `batch_size` defaults to sentence-transformers' 32, which is a sensible
+    default for a laptop CPU and a waste of a discrete GPU. A full-corpus
+    ingest should pass something like 128–256; the ceiling is VRAM, and the
+    symptom of overshooting is a CUDA OOM at the first batch rather than
+    anything subtle.
     """
     model = _get_model()
     prefixed = [f"passage: {t}" for t in texts]
+    kw = {"batch_size": batch_size} if batch_size else {}
     return model.encode(
         prefixed,
         normalize_embeddings=True,
         convert_to_numpy=True,
-        show_progress_bar=True,
+        show_progress_bar=show_progress,
+        **kw,
     )
 
 

@@ -104,8 +104,10 @@ Vrati ISKLJUČIVO JSON, bez ikakvog teksta oko njega:
   mostly_grounded  — sve supported ili partial, ništa unsupported/contradicted
   ungrounded       — bar jedna unsupported ili contradicted
 
-"citations_ok": jesu li izvori koje odgovor navodi doista oni izvatci iz kojih tvrdnje dolaze.
-Ako odgovor ne navodi nijedan izvor, stavi false."""
+"citations_ok": odnosi se ISKLJUČIVO na oznake publikacije i propisa (npr. "RRiF br. 12/2024",
+"Zakon o PDV-u, čl. 38") — jesu li to doista izvatci iz kojih tvrdnje dolaze. Imena autora
+potpuno zanemari i ovdje: izvatci ne sadrže podatak o autoru, pa ime autora nikada ne smije
+biti razlog da citations_ok bude false. Ako odgovor ne navodi nijednu oznaku izvora, stavi false."""
 
 
 def _fmt_chunks(meta: list[dict]) -> str:

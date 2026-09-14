@@ -64,11 +64,7 @@ except ImportError:                                    # pragma: no cover
 # format string, because a format string will miss exactly those 26 things.
 
 ISSUE_DIR = re.compile(r"^([A-Za-z]{3,6})(\d{2})(\d{2})$")
-# Two article-name shapes, matching rag/ingest/article_loader._parse_path:
-# the usual <letter><yy><mm><nn>, and the four-digit-year variant used by a
-# few supplement issues (OBRT1801/O20180101.PDF).
 ARTICLE = re.compile(r"^([A-Za-z])(\d{2})(\d{2})(\d{1,3})$")
-ARTICLE_YYYY = re.compile(r"^([A-Za-z])(\d{4})(\d{2})(\d{1,3})$")
 
 PUB_LABEL = {
     "RRIF": "RRiF",
@@ -120,10 +116,6 @@ def parse(pdf: Path, root: Path) -> dict:
     folder = pdf.parent.name
     fm = ISSUE_DIR.match(folder)
     sm = ARTICLE.match(pdf.stem)
-    yyyy = False
-    if not sm:
-        sm = ARTICLE_YYYY.match(pdf.stem)
-        yyyy = bool(sm)
 
     pub_code = fm.group(1).upper() if fm else ""
     year = 2000 + int(fm.group(2)) if fm else None
@@ -134,9 +126,8 @@ def parse(pdf: Path, root: Path) -> dict:
     # When they disagree, the file was almost certainly filed in the wrong
     # folder — rare, but it silently mis-dates an article, which for a tax
     # magazine is the one error that matters most.
-    stem_year = (int(sm.group(2)) % 100) if sm else None
     mismatch = bool(
-        fm and sm and (stem_year != int(fm.group(2))
+        fm and sm and (int(sm.group(2)) != int(fm.group(2))
                        or int(sm.group(3)) != int(fm.group(3)))
     )
 
@@ -146,10 +137,6 @@ def parse(pdf: Path, root: Path) -> dict:
     st = pdf.stat()
     return {
         "unit_ref": unit_ref,
-        # The archive root, repeated on every row so the manifest is
-        # self-describing: an ingest given only the CSV can still find the
-        # files. Redundant on disk, one less thing to pass on a command line.
-        "root": str(root).replace("\\", "/"),
         "pub_code": pub_code,
         "pub_label": PUB_LABEL.get(pub_code, pub_code),
         "year": year or "",

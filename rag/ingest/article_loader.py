@@ -315,6 +315,11 @@ PUB_TYPE = {
     "PROR": "Proračun",
     "OBAV": "Obavijesti",
     "NEPR": "Neprofitne organizacije",
+    # Annual supplements, found in _prilozi/. Without these three the citation
+    # reads "PRGO br. 1/2026", which is a label only the file system uses.
+    "PRGO": "RRiF Godišnji obračun",
+    "PRPI": "RRiF Godišnji popis imovine",
+    "OBRT": "RRiF Obrtnici",
 }
 
 BANNER_TO_CATEGORY = {
@@ -342,6 +347,11 @@ DEFAULT_CATEGORY_BY_PUB = {
     "PROR": "proračun",
     "OBAV": "ostalo",
     "NEPR": "neprofitne organizacije",
+    # The fallback matters more than it looks: the Čakovec case showed that a
+    # wrong category plus a hard domain filter makes a document invisible.
+    "PRGO": "računovodstvo",
+    "PRPI": "računovodstvo",
+    "OBRT": "porezi",
 }
 
 SECTION_PATTERN = re.compile(
@@ -374,6 +384,16 @@ class ArticleChunk:
     default_category: str
 
 
+# Article file names come in two shapes. The common one is <letter><yy><mm><nn>
+# (R260931). A handful of supplement issues use a four-digit year instead —
+# _prilozi/Obrtnici/OBRT1801/O20180101.PDF, where the leading O is followed by
+# 2018, 01, 01. Before this was handled, all five files of that issue failed to
+# parse and the issue vanished from every count, which is how "Obrtnici has no
+# 2018 or 2019" turned out to be true of only one of those years.
+_STEM_YY = re.compile(r'^[A-Z](\d{2})(\d{2})(\d{2,3})$')
+_STEM_YYYY = re.compile(r'^[A-Z](\d{4})(\d{2})(\d{2,3})$')
+
+
 def _parse_path(pdf_path: Path) -> tuple[str, int, int, str] | None:
     folder = pdf_path.parent.name.upper()
     stem   = pdf_path.stem.upper()
@@ -383,10 +403,19 @@ def _parse_path(pdf_path: Path) -> tuple[str, int, int, str] | None:
     pub_type = fm.group(1)
     year     = 2000 + int(fm.group(2))
     month    = int(fm.group(3))
-    sm = re.match(r'^[A-Z](\d{2})(\d{2})(\d{2,3})$', stem)
-    if not sm:
-        return None
-    return pub_type, year, month, sm.group(3)
+
+    sm = _STEM_YY.match(stem)
+    if sm:
+        return pub_type, year, month, sm.group(3)
+
+    sm = _STEM_YYYY.match(stem)
+    if sm:
+        # Trust the folder for the issue, as the six-digit branch does. The one
+        # known mismatch in the archive (OBRT2001/O200206.PDF) is a misfiled
+        # article, not a differently-dated one, and the manifest flags it.
+        return pub_type, year, month, sm.group(3)
+
+    return None
 
 
 # ── Journal-entry tables ──────────────────────────────────────────────────────
